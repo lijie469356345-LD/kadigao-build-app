@@ -1,0 +1,108 @@
+{
+  "name": "store-inspection-app",
+  "version": "1.0.1",
+  "description": "安卓移动端巡店管理APP",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "node dist/server/server.js",
+    "dev": "concurrently \"tsc -w\" \"nodemon dist/server/server.js\"",
+    "build": "tsc && vite build",
+    "client:dev": "vite",
+    "client:build": "vite build",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win nsis --config.directories.output=dist-electron/Windows",
+    "dist:mac": "electron-builder --mac dmg --config.directories.output=dist-electron/Mac",
+    "app:dev": "electron ."
+  },
+  "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
+    "axios": "^1.6.2",
+    "cors": "^2.8.6",
+    "electron-updater": "^6.8.9",
+    "express": "^4.18.2",
+    "form-data": "^4.0.6",
+    "jsonwebtoken": "^9.0.3",
+    "jszip": "^3.10.2",
+    "mssql": "^10.0.2",
+    "multer": "^2.1.1",
+    "pdf-lib": "^1.17.1",
+    "sharp": "^0.35.1",
+    "tesseract.js": "^7.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/mssql": "^8.1.2",
+    "@types/multer": "^2.1.0",
+    "@types/node": "^20.10.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^18.2.37",
+    "@types/react-dom": "^18.2.15",
+    "@vitejs/plugin-react": "^4.2.0",
+    "autoprefixer": "^10.4.16",
+    "concurrently": "^8.2.2",
+    "docx-preview": "^0.4.1",
+    "electron": "^44.8.0",
+    "electron-builder": "^26.15.3",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^4.2.1",
+    "lucide-react": "^0.294.0",
+    "nodemon": "^3.0.2",
+    "png-to-ico": "^3.0.2",
+    "postcss": "^8.4.31",
+    "pptx-preview": "^1.0.7",
+    "qrcode": "^1.5.4",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.20.0",
+    "tailwindcss": "^3.3.5",
+    "typescript": "^5.3.2",
+    "vite": "^5.0.0",
+    "zustand": "^4.4.7"
+  },
+  "build": {
+    "appId": "com.cardigao.inspection",
+    "productName": "卡迪高巡店系统",
+    "directories": {
+      "output": "dist-electron",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json",
+      "!dist/client/updates/**"
+    ],
+    "extraResources": [
+      {
+        "from": "config.json",
+        "to": "config.json"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "build/icon.png",
+      "category": "public.app-category.business"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "卡迪高巡店系统"
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://xdxt.henankadigao.cn/updates/win"
+      }
+    ]
+  }
+}

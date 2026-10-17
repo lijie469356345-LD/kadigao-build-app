@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #f5f5f5;
+}
+
+/* 移动端内容区宽度固定为 2048px（字号不变，超出部分横向滚动查看）；桌面端（>=1024px）保持原样 */
+@media (max-width: 1023.98px) {
+  .mobile-wide-150 {
+    width: 2048px;
+  }
+
+  /* PK报表页面单独恢复为 524px（其余页面保持 2048px） */
+  .mobile-wide-150.page-pk-report-narrow {
+    width: 524px;
+  }
+}
+
+.page-container {
+  min-height: 100vh;
+  background-color: #f5f5f5;
+}
+
+/* 表格行紧凑模式：手机端每屏可见更多行（压缩单元格内边距与行高，字号不变；禁止折行避免行盒翻倍） */
+.table-row-compact thead th,
+.table-row-compact tbody td {
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+  line-height: 20px !important;
+  white-space: nowrap !important;
+}
+
+.btn-primary {
+  @apply bg-primary text-white px-4 py-2 rounded-lg font-medium transition-colors;
+}
+
+.btn-primary:hover {
+  @apply bg-blue-600;
+}
+
+.btn-secondary {
+  @apply bg-gray-200 text-gray-700 px-4 py-2 rounded-lg font-medium transition-colors;
+}
+
+.btn-secondary:hover {
+  @apply bg-gray-300;
+}
+
+.btn-danger {
+  @apply bg-danger text-white px-4 py-2 rounded-lg font-medium transition-colors;
+}
+
+.btn-danger:hover {
+  @apply bg-red-600;
+}
+
+.form-input {
+  @apply w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent;
+}
+
+.form-label {
+  @apply block text-sm font-medium text-gray-700 mb-1;
+}
+
+.card {
+  @apply bg-white rounded-lg shadow-md p-4;
+}
+
+.required {
+  @apply text-danger;
+}

@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+
+# build outputs
+dist/
+dist-electron/
+*.tsbuildinfo
+
+# runtime data
+uploads/
+shipin/
+logs/
+updates/
+certs/
+
+# sensitive config (database password inside)
+config.json
+
+# local toolchains
+.android-tools/
+
+# android sub-project (managed separately)
+store-inspection-app-android/
+fanwei-reimbursement-app/
+
+# os / ide
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/

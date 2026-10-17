@@ -1,0 +1,46 @@
+{
+  "deliverable": "b2b-page",
+  "page_context": "b2b-page",
+  "design_target": "web",
+  "page_type": "dashboard",
+  "style": "dumate",
+  "shell_profile": "banlan-foundation-cloud-default",
+  "delivery_adapter": "static-export",
+  "delivery_format": "single-html",
+  "export_mode": "single-file",
+  "asset_policy": "inline-base64",
+  "core_task": "管理财务报销、借款、付款和记账全流程",
+  "primary_action": "提交报销申请",
+  "audience": "企业财务人员、部门负责人和审批管理员",
+  "data_source": "mock",
+  "data_contract": {
+    "source": "mock",
+    "entities": ["reimbursement", "loan", "payment", "voucher", "approval", "subject"],
+    "read_operations": ["listReimbursements", "listLoans", "listPayments", "listVouchers", "listApprovals", "listSubjects"],
+    "write_operations": ["createReimbursement", "createLoan", "createPayment", "createVoucher", "approveBill"]
+  },
+  "states": ["loading", "empty", "error", "populated"],
+  "navigation_items": [
+    { "key": "workbench", "label": "工作台", "path": "/workbench" },
+    { "key": "reimbursement-apply", "label": "报销申请", "path": "/reimbursement/apply" },
+    { "key": "reimbursement-list", "label": "报销列表", "path": "/reimbursement/list" },
+    { "key": "loan-apply", "label": "借款申请", "path": "/loan/apply" },
+    { "key": "loan-list", "label": "借款记录", "path": "/loan/list" },
+    { "key": "payment-apply", "label": "付款申请", "path": "/payment/apply" },
+    { "key": "payment-list", "label": "付款记录", "path": "/payment/list" },
+    { "key": "accounting-voucher", "label": "凭证录入", "path": "/accounting/voucher" },
+    { "key": "accounting-ledger", "label": "账簿查询", "path": "/accounting/ledger" },
+    { "key": "accounting-subjects", "label": "科目管理", "path": "/accounting/subjects" },
+    { "key": "approval", "label": "审批中心", "path": "/approval" },
+    { "key": "reports", "label": "报表中心", "path": "/reports" },
+    { "key": "settings-params", "label": "基础参数", "path": "/settings/params" },
+    { "key": "settings-workflow", "label": "审批流程", "path": "/settings/workflow" },
+    { "key": "settings-personnel", "label": "人员管理", "path": "/settings/personnel" }
+  ],
+  "active_navigation_key": "workbench",
+  "validation_plan": {
+    "source_checks": ["delivery-gate"],
+    "build_checks": ["production build"],
+    "browser_checks": ["six-viewport browser evidence"]
+  }
+}
