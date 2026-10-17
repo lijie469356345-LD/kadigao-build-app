@@ -16,8 +16,9 @@ certs/
 # sensitive config (database password inside)
 config.json
 
-# local toolchains
+# local toolchains / local binaries
 .android-tools/
+node.exe
 
 # android sub-project (managed separately)
 store-inspection-app-android/
