@@ -38,20 +38,7 @@ jobs:
             echo "config.json restored from secret"
           else
             echo "::warning::CONFIG_JSON_BASE64 secret not set; writing placeholder config.json. App cannot connect to database until the secret is configured."
-            cat > config.json <<'EOF'
-{
-  "database": {
-    "server": "127.0.0.1",
-    "port": 1588,
-    "database": "伯俊库",
-    "user": "sa",
-    "password": ""
-  },
-  "server": { "port": 3000 },
-  "auth": { "enforce": false, "defaultPassword": "8888", "jwtExpiresIn": "12h" },
-  "client": { "apiBase": "/api" }
-}
-EOF
+            echo '{"database":{"server":"127.0.0.1","port":1588,"database":"伯俊库","user":"sa","password":""},"server":{"port":3000},"auth":{"enforce":false,"defaultPassword":"8888","jwtExpiresIn":"12h"},"client":{"apiBase":"/api"}}' > config.json
           fi
           echo "--- config.json ---"
           cat config.json
