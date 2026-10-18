@@ -2,14 +2,14 @@ import { useCallback, useEffect, useState } from 'react';
 import Layout from '../components/Layout';
 import { useAuthStore } from '../../store/authStore';
 import {
-  getBadgeLedger, submitBadgeMaking, getReimburses, financeReview,
+  getBadgeLedger, submitBadgeMaking, batchSubmitBadgeMaking, getReimburses, financeReview,
   type BadgeLedgerItem, type ReimburseItem,
 } from '../../api/onboarding';
 import { Loader2 } from 'lucide-react';
 
 /**
  * 工牌制作统计台账 · 阶段七
- *  - 行政：台账中筛选「待制作」记录 → 【提交广告公司制作】→ 自动生成工牌报销单并流转财务
+ *  - 行政：台账中筛选「待制作」记录 → （单个或批量勾选）【提交广告公司制作】→ 输入金额 → 自动生成工牌报销单并流转财务
  *  - 财务：报销单审核/核销 → 核销后整条入职记录自动更新为【入职流程全部完成】
  *  - 行政/财务随时查询统计；支持状态筛选
  */
@@ -35,6 +35,8 @@ export default function OnboardingBadgePage() {
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState('');
   const [makeModal, setMakeModal] = useState<BadgeLedgerItem | null>(null);
+  const [checkedIds, setCheckedIds] = useState<number[]>([]);
+  const [batchModal, setBatchModal] = useState(false);
 
   const roleCodes: string[] = (user?.roleCodes || []).filter((c: any) => typeof c === 'string');
   const isAdmin = user?.isAdmin === '是' || roleCodes.includes('super_admin') || roleCodes.includes('data_admin');
@@ -70,6 +72,24 @@ export default function OnboardingBadgePage() {
     }
   };
 
+  // 仅「待制作」记录可勾选批量提交，刷新后剔除已失效的勾选
+  const toggleCheck = (id: number) => {
+    setCheckedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+  const toggleAllPending = () => {
+    const pendings = ledgers.filter((l) => l.status === 'pending').map((l) => l.id);
+    const allChecked = pendings.length > 0 && pendings.every((id) => checkedIds.includes(id));
+    setCheckedIds(allChecked ? [] : pendings);
+  };
+  // 加载完成后清洗勾选：只保留仍为待制作且有权限处理的记录
+  useEffect(() => {
+    setCheckedIds((prev) => prev.filter((id) => {
+      const it = ledgers.find((l) => l.id === id);
+      return !!it && it.status === 'pending';
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ledgers]);
+
   const inputCls = 'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-100';
 
   return (
@@ -93,6 +113,18 @@ export default function OnboardingBadgePage() {
               <option value="">全部</option>
               {Object.entries(BADGE_STATUS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
             </select>
+            {isAdminStaff && (
+              <button onClick={toggleAllPending}
+                className={`px-3 py-1.5 rounded-md text-xs border transition-colors ${checkedIds.length > 0 ? 'bg-blue-50 border-blue-300 text-blue-700 hover:bg-blue-100' : 'border-gray-300 text-gray-500 hover:bg-gray-50'}`}>
+                {checkedIds.length > 0 ? `已选 ${checkedIds.length} 条 · 取消全选` : '全选待制作'}
+              </button>
+            )}
+            {isAdminStaff && checkedIds.length > 0 && (
+              <button onClick={() => setBatchModal(true)}
+                className="px-3 py-1.5 rounded-md bg-blue-600 text-white text-xs hover:bg-blue-700">
+                批量提交制作（勾选 {checkedIds.length} 条）
+              </button>
+            )}
             <span className="ml-auto text-xs text-gray-400">共 {ledgers.length} 条</span>
           </div>
           <div className="bg-white rounded-xl shadow-sm overflow-x-auto">
@@ -104,6 +136,7 @@ export default function OnboardingBadgePage() {
               <table className="min-w-full text-sm">
                 <thead>
                   <tr className="bg-gray-50 text-gray-500 text-left">
+                    {isAdminStaff && <th className="px-4 py-3 font-medium w-10">勾选</th>}
                     <th className="px-4 py-3 font-medium">员工</th>
                     <th className="px-4 py-3 font-medium">工号/申请号</th>
                     <th className="px-4 py-3 font-medium">店铺/职级</th>
@@ -121,6 +154,14 @@ export default function OnboardingBadgePage() {
                     const bm = BADGE_STATUS[l.status] || BADGE_STATUS.pending;
                     return (
                       <tr key={l.id} className="border-t border-gray-100 hover:bg-gray-50/60">
+                        {isAdminStaff && (
+                          <td className="px-4 py-3">
+                            <input type="checkbox" className="w-4 h-4 accent-blue-600 cursor-pointer"
+                              checked={checkedIds.includes(l.id)} onChange={() => toggleCheck(l.id)}
+                              disabled={l.status !== 'pending'}
+                              title={l.status === 'pending' ? '勾选可批量提交' : '仅待制作可勾选'} />
+                          </td>
+                        )}
                         <td className="px-4 py-3">
                           <div className="font-medium text-gray-800">{l.userName}</div>
                           <div className="text-xs text-gray-400">{l.phone || '-'}</div>
@@ -216,7 +257,12 @@ export default function OnboardingBadgePage() {
 
       {makeModal && (
         <MakeBadgeModal item={makeModal} onClose={() => setMakeModal(null)}
-          onDone={(msg) => { showToast(msg); setMakeModal(null); load(); }} />
+          onDone={(msg) => { showToast(msg); setMakeModal(null); setCheckedIds([]); load(); }} />
+      )}
+
+      {batchModal && (
+        <BatchMakeModal items={ledgers.filter((l) => checkedIds.includes(l.id))} onClose={() => setBatchModal(false)}
+          onDone={(msg) => { showToast(msg); setBatchModal(false); setCheckedIds([]); load(); }} />
       )}
     </Layout>
   );
@@ -265,6 +311,97 @@ function MakeBadgeModal({ item, onClose, onDone }: { item: BadgeLedgerItem; onCl
               {busy ? '提交中...' : '确认提交制作'}
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* 批量提交广告公司制作弹窗：统一广告公司，逐条录入金额 → 自动生成每人工牌报销单并流转财务 */
+function BatchMakeModal({ items, onClose, onDone }: { items: BadgeLedgerItem[]; onClose: () => void; onDone: (msg: string) => void }) {
+  const [maker, setMaker] = useState('');
+  const [amounts, setAmounts] = useState<Record<number, string>>(() => {
+    const m: Record<number, string> = {};
+    items.forEach((it) => { if (it.amount != null) m[it.id] = String(it.amount); });
+    return m;
+  });
+  const [remark, setRemark] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const total = items.reduce((s, it) => s + (Number(amounts[it.id]) || 0), 0);
+  const submit = async () => {
+    setErr('');
+    if (!maker.trim()) return setErr('请填写广告公司名称');
+    const nums: Record<number, number> = {};
+    for (const it of items) {
+      const v = Number(amounts[it.id]);
+      if (!Number.isFinite(v) || v <= 0) return setErr(`请为「${it.userName}」填写有效的工牌制作费用`);
+      nums[it.id] = v;
+    }
+    setBusy(true);
+    try {
+      const res = await batchSubmitBadgeMaking({ ids: items.map((it) => it.id), maker: maker.trim(), amounts: nums, remark: remark.trim() });
+      onDone(res.message);
+    } catch (e: any) { setErr(e?.response?.data?.message || '操作失败'); setBusy(false); }
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-base font-semibold text-gray-800 px-6 pt-5 pb-3 border-b border-gray-100">批量提交广告公司制作 · 共 {items.length} 条</h3>
+        <div className="p-6 space-y-4 overflow-y-auto">
+          <div>
+            <label className="block text-sm text-gray-600 mb-1">广告公司名称 <span className="text-red-500">*</span></label>
+            <input className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" value={maker} onChange={(e) => setMaker(e.target.value)} placeholder="如：XX 广告印务" />
+          </div>
+          <div className="border border-gray-200 rounded-lg overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="bg-gray-50 text-gray-500 text-left">
+                  <th className="px-3 py-2 font-medium">员工</th>
+                  <th className="px-3 py-2 font-medium">工号/申请号</th>
+                  <th className="px-3 py-2 font-medium">工牌编号</th>
+                  <th className="px-3 py-2 font-medium w-36">制作费用（元）</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((it) => (
+                  <tr key={it.id} className="border-t border-gray-100">
+                    <td className="px-3 py-2">
+                      <div className="text-gray-800">{it.userName}</div>
+                      <div className="text-xs text-gray-400">{it.shopName || ''}{it.level ? ` / ${it.level}` : ''}</div>
+                    </td>
+                    <td className="px-3 py-2 text-gray-600">{it.applyNo || '-'}</td>
+                    <td className="px-3 py-2 text-gray-600">{it.badgeNo || '-'}</td>
+                    <td className="px-3 py-2">
+                      <input type="number" min="0" step="0.01" className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-sm"
+                        value={amounts[it.id] ?? ''} onChange={(e) => setAmounts((m) => ({ ...m, [it.id]: e.target.value }))}
+                        placeholder="必填" />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="flex items-center justify-between">
+            <div>
+              <label className="block text-sm text-gray-600 mb-1">备注</label>
+              <input className="w-64 px-3 py-2 border border-gray-300 rounded-lg text-sm" value={remark} onChange={(e) => setRemark(e.target.value)} placeholder="可选" />
+            </div>
+            <div className="text-right">
+              <div className="text-xs text-gray-400">合计金额</div>
+              <div className="text-lg font-semibold text-gray-800">¥{total.toFixed(2)}</div>
+            </div>
+          </div>
+          <div className="p-3 rounded-lg bg-gray-50 text-xs text-gray-500">
+            提交后将按人为每名员工自动生成工牌报销单（关联入职信息、制作费用、申请时间），并统一流转至财务审批节点。
+          </div>
+          {err && <div className="text-sm text-red-500">{err}</div>}
+        </div>
+        <div className="flex justify-end gap-2 px-6 pb-5 border-t border-gray-100 pt-4">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg border border-gray-300 text-sm text-gray-600">取消</button>
+          <button onClick={submit} disabled={busy} className="px-5 py-2 rounded-lg bg-blue-600 text-sm text-white hover:bg-blue-700 disabled:opacity-50">
+            {busy ? '提交中...' : `确认批量提交（${items.length} 条）并生成报销单`}
+          </button>
         </div>
       </div>
     </div>

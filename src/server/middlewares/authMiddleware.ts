@@ -1,7 +1,9 @@
 import { NextFunction, Request, Response } from 'express';
+import sql from 'mssql';
 import { JwtUserPayload, verifyToken } from '../services/jwt';
 import { isPrivilegedUser } from '../services/permissionService';
 import { readAuthConfig } from '../services/appConfig';
+import { getPool } from '../../config/db';
 
 // Express Request 扩展：req.user 携带 JWT 解析出的身份
 declare global {
@@ -41,12 +43,32 @@ export function overrideIdentityParams(req: Request, user: JwtUserPayload) {
   }
 }
 
-/** 强制鉴权：无有效 token 一律 401（白名单路径由网关自行放行） */
-export function authMiddleware(req: Request, res: Response, next: NextFunction) {
+/** 校验用户是否已登记离职（resignation_record 命中即禁止登录）。
+ *  查询失败（如表不存在/DB 异常）时放行，避免离职校验问题打挂全部接口，
+ *  保证系统可用性优先。 */
+async function isResignedUser(userCode?: string): Promise<boolean> {
+  if (!userCode) return false;
+  try {
+    const pool = await getPool();
+    const r = await pool.request()
+      .input('code', sql.NVarChar, userCode)
+      .query(`SELECT 1 AS c FROM resignation_record WHERE user_code = @code`);
+    return (r.recordset?.length ?? 0) > 0;
+  } catch (e: any) {
+    console.log('[Auth] 离职状态校验失败（放行）:', e?.message);
+    return false;
+  }
+}
+
+/** 强制鉴权：无有效 token 一律 401（白名单路径由网关自行放行）；已登记离职的账号一并拒绝 */
+export async function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const token = extractToken(req);
   const user = token ? verifyToken(token) : null;
   if (!user) {
     return res.status(401).json({ code: 'UNAUTHORIZED', message: '未登录或登录已过期' });
+  }
+  if (await isResignedUser(user.userCode)) {
+    return res.status(401).json({ code: 'ACCOUNT_RESIGNED', message: '该账号已登记离职，禁止登录' });
   }
   req.user = user;
   overrideIdentityParams(req, user);
@@ -54,11 +76,16 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 }
 
 /** 软鉴权：解析到有效 token 则设置身份并强制覆盖；否则放行（req.user=null） */
-export function optionalAuthMiddleware(req: Request, res: Response, next: NextFunction) {
+export async function optionalAuthMiddleware(req: Request, res: Response, next: NextFunction) {
   const token = extractToken(req);
   const user = token ? verifyToken(token) : null;
   req.user = user;
-  if (user) overrideIdentityParams(req, user);
+  if (user) {
+    if (await isResignedUser(user.userCode)) {
+      return res.status(401).json({ code: 'ACCOUNT_RESIGNED', message: '该账号已登记离职，禁止登录' });
+    }
+    overrideIdentityParams(req, user);
+  }
   next();
 }
 

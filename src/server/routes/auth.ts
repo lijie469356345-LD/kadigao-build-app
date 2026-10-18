@@ -3,6 +3,7 @@ import sql from 'mssql';
 import { getPool } from '../../config/db';
 import { JwtUserPayload, signToken } from '../services/jwt';
 import { readAuthConfig } from '../services/appConfig';
+import { isVersionAllowed } from '../services/versionPolicy';
 import { authMiddleware } from '../middlewares/authMiddleware';
 
 const router = Router();
@@ -15,10 +16,25 @@ const router = Router();
  */
 router.post('/login', async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, password, version } = req.body;
 
     if (!username || !password) {
       return res.status(400).json({ message: '用户名和密码不能为空' });
+    }
+
+    // 版本策略拦截：桌面客户端携带 version 字段；安卓 WebView 带 CardigaoApp/x.y.z
+    // 的 UA（APP_HOST 内网页由 WebView 壳加载，UA 携带真实版本号）；纯浏览器网页版
+    // 两者都不携带 → 放行。发布新版本后，低于公网策略 minVersion 的旧版本客户端
+    // 直接拒绝登录，前端会引导前往下载中心升级。双保险：即便绕过前端 UI 直接调接口也会被拦。
+    const ua = (req.headers['user-agent'] || '') as string;
+    const uaMatch = ua.match(/CardigaoApp\/([\d.]+)/);
+    const clientVersion = version || (uaMatch ? uaMatch[1] : undefined);
+    if (!isVersionAllowed(clientVersion)) {
+      console.log(`=== 版本过低，拒绝登录 === version=${clientVersion} (body=${version}, ua=${uaMatch ? uaMatch[1] : '-'})`);
+      return res.status(403).json({
+        code: 'VERSION_TOO_OLD',
+        message: '当前版本过低，请升级客户端后再登录',
+      });
     }
 
     console.log('=== 登录请求 ===');
@@ -60,6 +76,20 @@ router.post('/login', async (req, res) => {
 
         if (dbPassword === null || dbPassword === undefined || dbPassword === '') {
           console.warn(`[Auth] 用户「${username}」使用默认密码登录，请尽快设置真实密码`);
+        }
+
+        // 离职拦截：已登记离职的账号一律禁止登录（登记即生效，无审批流程）
+        try {
+          const resigned = await pool.request()
+            .input('uc', sql.NVarChar, dbUser['用户代码'])
+            .query(`SELECT 1 AS c FROM resignation_record WHERE user_code = @uc`);
+          if ((resigned.recordset?.length ?? 0) > 0) {
+            console.log('=== 离职账号禁止登录 ===', dbUser['用户代码']);
+            return res.status(403).json({ code: 'ACCOUNT_RESIGNED', message: '该账号已登记离职，禁止登录' });
+          }
+        } catch (resignedError: any) {
+          // 离职表检查失败不阻断登录（保证系统可用性）
+          console.log('[Auth] 离职状态检查失败（放行）:', resignedError?.message);
         }
 
         const isAdmin = dbUser['管理员'] === '是' || dbUser['管理员'] === 1 || dbUser['管理员'] === true;

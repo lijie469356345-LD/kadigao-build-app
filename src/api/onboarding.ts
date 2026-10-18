@@ -47,6 +47,7 @@ export interface OnboardingRecord {
   adminBojunAccount: string;
   adminGroupQr: string;
   adminMemberQr: string;
+  memberCode: string;
   adminFinishTime: string;
   issueTime: string;
   probationStart: string;
@@ -56,6 +57,7 @@ export interface OnboardingRecord {
   badgeApplyTime: string;
   badgeNo: string;
   badgeAmount: number | null;
+  wecomQr: string;
   day3Warned: number;
   day7Logged: number;
   remark: string;
@@ -106,11 +108,14 @@ export interface CardAdjustItem {
   id: number;
   userName: string;
   userCode: string;
+  phone: string;
+  memberCode: string;
   adjustType: string;
   adjustTypeLabel: string;
   reason: string;
   submitter: string;
   status: string;
+  handler: string;
   handleTime: string;
   remark: string;
   createTime: string;
@@ -134,6 +139,14 @@ export const getOnboardingOptions = async () => {
   return res.data as OnboardingOptions;
 };
 
+/** 佐证材料图片上传（公开，扫码页无登录态），返回 /uploads/onboarding/ 相对路径 */
+export const uploadOnboardingImage = async (file: File) => {
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await axios.post('/onboarding/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+  return res.data as { ok: boolean; url: string; message?: string };
+};
+
 export const applyOnboarding = async (payload: {
   userName: string;
   phone: string;
@@ -153,7 +166,7 @@ export const applyOnboarding = async (payload: {
   return res.data as { ok: boolean; message: string; id?: number; userCode?: string };
 };
 
-// ---------- 管理：记录列表 / 详情 ----------
+// ---------- 管理：记录列表 / 详情（status 支持逗号分隔多状态，如 'account_ready,probation'） ----------
 export const getOnboardingRecords = async (status?: string) => {
   const res = await axios.get('/onboarding/records', { params: status ? { status } : {} });
   return res.data as { records: OnboardingRecord[] };
@@ -176,7 +189,7 @@ export const reviewOnboarding = async (
 // ---------- 管理：行政快速建用户（一键集成 4 项） ----------
 export const adminOpenOnboarding = async (
   id: number,
-  payload: { adminUserCode?: string; bojunAccount?: string; groupQr?: string; memberQr?: string; password?: string; confirm: boolean },
+  payload: { adminUserCode?: string; bojunAccount?: string; groupQr?: string; memberCode?: string; password?: string; confirm: boolean },
 ) => {
   const res = await axios.post(`/onboarding/records/${id}/admin-open`, payload);
   return res.data as { ok: boolean; message: string; adminUserCode?: string };
@@ -194,8 +207,8 @@ export const confirmProbation = async (id: number, payload: { result: 'pass' | '
   return res.data as { ok: boolean; message: string };
 };
 
-// ---------- 管理：督导提交工牌制作申请 ----------
-export const applyBadge = async (id: number, payload: { badgeNo?: string; amount?: number }) => {
+// ---------- 管理：督导提交工牌制作申请（转正后，含员工个人企微二维码） ----------
+export const applyBadge = async (id: number, payload: { badgeNo?: string; amount?: number; wecomQr?: string }) => {
   const res = await axios.post(`/onboarding/records/${id}/apply-badge`, payload);
   return res.data as { ok: boolean; message: string };
 };
@@ -208,6 +221,12 @@ export const getBadgeLedger = async (status?: string) => {
 
 export const submitBadgeMaking = async (id: number, payload: { maker: string; amount?: number; remark?: string }) => {
   const res = await axios.post(`/onboarding/badge-ledger/${id}/submit-making`, payload);
+  return res.data as { ok: boolean; message: string };
+};
+
+/** 批量提交多条待制作工牌：统一广告公司，逐条金额 → 每人生成报销单并流转财务 */
+export const batchSubmitBadgeMaking = async (payload: { ids: number[]; maker: string; amounts: Record<number, number>; remark?: string }) => {
+  const res = await axios.post('/onboarding/badge-ledger/batch-submit-making', payload);
   return res.data as { ok: boolean; message: string };
 };
 
@@ -226,6 +245,12 @@ export const financeReview = async (id: number, payload: { action: 'approve' | '
 export const getCardAdjusts = async (status?: string) => {
   const res = await axios.get('/onboarding/card-adjust', { params: status ? { status } : {} });
   return res.data as { adjusts: CardAdjustItem[] };
+};
+
+/** 内购卡调整「确认已处理」：会员专员在会员系统完成调整后回填状态 */
+export const markCardAdjustDone = async (id: number, payload?: { remark?: string }) => {
+  const res = await axios.post(`/onboarding/card-adjust/${id}/mark-done`, payload || {});
+  return res.data as { ok: boolean; message: string };
 };
 
 // ---------- 管理：超时台账 ----------

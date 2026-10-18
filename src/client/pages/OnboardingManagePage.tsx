@@ -3,31 +3,34 @@ import Layout from '../components/Layout';
 import { useAuthStore } from '../../store/authStore';
 import {
   getOnboardingRecords, getTimeoutLogs, reviewOnboarding, adminOpenOnboarding,
-  issueOnboarding, confirmProbation, applyBadge,
   type OnboardingRecord, type TimeoutLogItem, type OnboardingOptions,
 } from '../../api/onboarding';
 import { Loader2, QrCode } from 'lucide-react';
 import QRCode from 'qrcode';
 
 /**
- * 入职管理 · 阶段二至阶段六（督导 / 管理层 / 行政）
- *  - 督导：本人待初审记录 → 驳回或同意+定级（店铺/职级/薪资方案）；
- *           账号开通完成后下发（进入 15 天考核期）；考核期满确认；提交工牌制作申请
+ * 入职管理 · 阶段二至阶段四（督导 / 管理层 / 行政）
+ *  - 督导：本人待初审记录 → 驳回或同意+定级（店铺/职级/薪资方案）
  *  - 管理层（区经/总监）：只读监管（无操作按钮）
- *  - 行政：已定级记录 → 快速建用户（建账号+企微群二维码+伯俊备案+会员注册码），提交确认后待下发
- *  - 超时台账：第 3 天预警 / 第 7 天超时 / 15 天考核到期的自动记录
+ *  - 行政：已定级记录 → 快速建用户（建账号+企微群二维码+伯俊备案+会员注册码），提交确认即「建档完成 = 入职成功」
+ *  - 建档完成后信息进入转正管理「待入职」；下发/考核/转正/工牌/企微码/报销均在转正管理处理
+ *  - 超时台账：第 3 天预警 / 第 7 天超时的自动记录（考核到期台账在转正管理）
  */
 const STATUS_META: Record<string, { label: string; cls: string }> = {
   pending_review: { label: '待督导初审', cls: 'bg-amber-100 text-amber-700' },
   rejected: { label: '入职驳回', cls: 'bg-red-100 text-red-600' },
-  graded: { label: '已定级·待开通', cls: 'bg-blue-100 text-blue-700' },
-  account_ready: { label: '账号开通完成·待下发', cls: 'bg-indigo-100 text-indigo-700' },
-  probation: { label: '15天考核期', cls: 'bg-cyan-100 text-cyan-700' },
-  probation_passed: { label: '考核通过·待工牌', cls: 'bg-teal-100 text-teal-700' },
+  graded: { label: '已定级·待建档', cls: 'bg-blue-100 text-blue-700' },
+  account_ready: { label: '入职成功（建档完成）', cls: 'bg-green-100 text-green-700' },
+  // 以下状态由转正管理接管，仅作历史数据展示（筛选下拉不提供、无操作按钮）
+  probation: { label: '转正考核中', cls: 'bg-cyan-100 text-cyan-700' },
+  probation_passed: { label: '已转正·待工牌', cls: 'bg-teal-100 text-teal-700' },
   badge_applied: { label: '工牌申请已提交', cls: 'bg-purple-100 text-purple-700' },
   badge_making: { label: '工牌制作中', cls: 'bg-slate-200 text-slate-700' },
-  completed: { label: '入职流程全部完成', cls: 'bg-green-100 text-green-700' },
+  completed: { label: '转正流程全部完成', cls: 'bg-green-100 text-green-700' },
 };
+
+// 入职管理页状态筛选：仅入职阶段（建档完成即入职成功，之后状态归转正管理）
+const FILTER_STATUSES = ['pending_review', 'rejected', 'graded', 'account_ready'];
 
 const ADMIN_ROLES = ['super_admin', 'data_admin', 'admin_staff', 'hr_staff', 'hr'];
 const MGMT_ROLES = ['area_manager', 'ops_director'];
@@ -41,7 +44,7 @@ export default function OnboardingManagePage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState('');
-  const [modal, setModal] = useState<{ type: 'review' | 'admin' | 'probation' | 'badge'; record: OnboardingRecord } | null>(null);
+  const [modal, setModal] = useState<{ type: 'review' | 'admin'; record: OnboardingRecord } | null>(null);
   const [qrOpen, setQrOpen] = useState(false);
   const [qrPreview, setQrPreview] = useState('');
   const applyUrl = useMemo(() => `${window.location.origin}/onboarding-apply`, []);
@@ -106,38 +109,18 @@ export default function OnboardingManagePage() {
           ? <button onClick={() => setModal({ type: 'admin', record: r })} className="px-3 py-1.5 rounded-md bg-indigo-600 text-white text-xs hover:bg-indigo-700">快速建用户</button>
           : <span className="text-xs text-gray-400">待行政开通</span>;
       case 'account_ready':
-        if (isAdminStaff) {
-          return (
-            <div className="flex gap-2">
-              <button onClick={() => setModal({ type: 'admin', record: r })} className="px-3 py-1.5 rounded-md bg-indigo-600 text-white text-xs hover:bg-indigo-700">开通信息</button>
-              {isSupervisor && <button onClick={() => doIssue(r)} className="px-3 py-1.5 rounded-md bg-cyan-600 text-white text-xs hover:bg-cyan-700">下发账号（进入15天考核）</button>}
-            </div>
-          );
-        }
-        return isSupervisor
-          ? <button onClick={() => doIssue(r)} className="px-3 py-1.5 rounded-md bg-cyan-600 text-white text-xs hover:bg-cyan-700">下发账号（进入15天考核）</button>
-          : <span className="text-xs text-gray-400">待督导下发</span>;
+        return isAdminStaff
+          ? <button onClick={() => setModal({ type: 'admin', record: r })} className="px-3 py-1.5 rounded-md bg-indigo-600 text-white text-xs hover:bg-indigo-700">开通信息</button>
+          : <span className="text-xs text-gray-400">已转入转正管理</span>;
+      // 以下状态由转正管理接管，本页只读
       case 'probation':
-        return isSupervisor
-          ? <button onClick={() => setModal({ type: 'probation', record: r })} className="px-3 py-1.5 rounded-md bg-teal-600 text-white text-xs hover:bg-teal-700">考核确认</button>
-          : <span className="text-xs text-gray-400">考核计时中</span>;
       case 'probation_passed':
-        return isSupervisor
-          ? <button onClick={() => setModal({ type: 'badge', record: r })} className="px-3 py-1.5 rounded-md bg-purple-600 text-white text-xs hover:bg-purple-700">提交工牌制作申请</button>
-          : <span className="text-xs text-gray-400">待工牌</span>;
+      case 'badge_applied':
+      case 'badge_making':
+      case 'completed':
+        return <span className="text-xs text-gray-400">已转入转正管理</span>;
       default:
         return <span className="text-xs text-gray-400">—</span>;
-    }
-  };
-
-  const doIssue = async (r: OnboardingRecord) => {
-    if (!window.confirm(`确认下发账号给 ${r.userName}？下发后自动进入 15 天入职考核期（系统自动计时）。`)) return;
-    try {
-      const res = await issueOnboarding(r.id);
-      showToast(res.message);
-      load();
-    } catch (e: any) {
-      showToast(e?.response?.data?.message || '下发失败');
     }
   };
 
@@ -145,7 +128,7 @@ export default function OnboardingManagePage() {
   const inputCls = 'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30';
 
   return (
-    <Layout title="入职管理" subtitle="新员工入职全流程：录入 → 督导初审(3-7天) → 定级 → 行政建用户 → 下发(15天考核) → 工牌制作报销闭环">
+    <Layout title="入职管理" subtitle="新员工入职全流程：录入 → 督导初审(3-7天) → 定级 → 行政建档（建档完成即入职成功）→ 转正管理（下发/考核/工牌/企微码/报销）">
       {toast && <div className="mb-3 p-3 rounded-lg bg-green-50 border border-green-200 text-green-700 text-sm">{toast}</div>}
 
       <div className="mb-4 flex items-end gap-2 border-b border-gray-200">
@@ -174,7 +157,7 @@ export default function OnboardingManagePage() {
             <span className="text-sm text-gray-600">状态筛选：</span>
             <select className={`${inputCls} w-auto`} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="">全部状态</option>
-              {Object.entries(STATUS_META).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              {FILTER_STATUSES.map((k) => <option key={k} value={k}>{STATUS_META[k].label}</option>)}
             </select>
             <span className="ml-auto text-xs text-gray-400">共 {filtered.length} 条</span>
           </div>
@@ -311,8 +294,6 @@ export default function OnboardingManagePage() {
       {modal && <ModalShell onClose={() => setModal(null)} title={modalTitle(modal.type, modal.record.userName)}>
         {modal.type === 'review' && <ReviewModal record={modal.record} options={options} onClose={() => setModal(null)} onDone={(msg) => { showToast(msg); setModal(null); load(); }} />}
         {modal.type === 'admin' && <AdminOpenModal record={modal.record} onClose={() => setModal(null)} onDone={(msg) => { showToast(msg); setModal(null); load(); }} />}
-        {modal.type === 'probation' && <ProbationModal record={modal.record} onClose={() => setModal(null)} onDone={(msg) => { showToast(msg); setModal(null); load(); }} />}
-        {modal.type === 'badge' && <BadgeModal record={modal.record} onClose={() => setModal(null)} onDone={(msg) => { showToast(msg); setModal(null); load(); }} />}
       </ModalShell>}
 
       {qrOpen && <ModalShell onClose={() => setQrOpen(false)} title="新员工入职二维码">
@@ -364,8 +345,6 @@ function modalTitle(type: string, name: string) {
   const map: Record<string, string> = {
     review: `督导初审 · ${name}`,
     admin: `快速建用户 · ${name}`,
-    probation: `15天考核确认 · ${name}`,
-    badge: `提交工牌制作申请 · ${name}`,
   };
   return map[type] || '';
 }
@@ -440,7 +419,7 @@ function ReviewModal({ record, options, onClose, onDone }: {
             <label className="block text-sm text-gray-600 mb-1">核定入职职级 <span className="text-red-500">*</span></label>
             <select className={inputCls} value={level} onChange={(e) => setLevel(e.target.value)}>
               <option value="">请选择职级</option>
-              {options.levels.map((l) => <option key={l} value={l}>{l}</option>)}
+              {['初级', '中级', '高级'].map((l) => <option key={l} value={l}>{l}</option>)}
             </select>
           </div>
           <div>
@@ -474,14 +453,17 @@ function ReviewModal({ record, options, onClose, onDone }: {
 }
 
 /* ---------- 行政快速建用户：一键集成 4 项 ---------- */
+// 企微总群二维码（第2项展示）：默认地址由公司提供后在此配置，系统自动获取展示
+const DEFAULT_WECOM_GROUP_QR = ''; // TODO: 填入企微总群二维码图片地址（用户提供后配置）
+
 function AdminOpenModal({ record, onClose, onDone }: {
   record: OnboardingRecord; onClose: () => void; onDone: (msg: string) => void;
 }) {
   const [adminUserCode, setAdminUserCode] = useState(record.adminUserCode || record.userCode || '');
   const [password, setPassword] = useState('8888');
-  const [groupQr, setGroupQr] = useState(record.adminGroupQr || '');
+  const [groupQr, setGroupQr] = useState(record.adminGroupQr || DEFAULT_WECOM_GROUP_QR);
   const [bojunAccount, setBojunAccount] = useState(record.adminBojunAccount || '');
-  const [memberQr, setMemberQr] = useState(record.adminMemberQr || '');
+  const [memberCode, setMemberCode] = useState(record.memberCode || '');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const inputCls = 'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-100';
@@ -489,9 +471,9 @@ function AdminOpenModal({ record, onClose, onDone }: {
   const save = async (confirm: boolean) => {
     setErr('');
     if (confirm && !adminUserCode.trim()) return setErr('请填写系统后台账号代码');
-    if (confirm && !groupQr.trim()) return setErr('请填写企微总群二维码（URL 或说明）');
+    if (confirm && !groupQr.trim()) return setErr('请填写企微总群二维码地址');
     if (confirm && !bojunAccount.trim()) return setErr('请录入并绑定员工伯俊账号');
-    if (confirm && !memberQr.trim()) return setErr('请填写店铺会员注册码（URL 或说明）');
+    if (confirm && !memberCode.trim()) return setErr('请填写会员代码');
     setBusy(true);
     try {
       const res = await adminOpenOnboarding(record.id, {
@@ -499,7 +481,7 @@ function AdminOpenModal({ record, onClose, onDone }: {
         password,
         groupQr: groupQr.trim(),
         bojunAccount: bojunAccount.trim(),
-        memberQr: memberQr.trim(),
+        memberCode: memberCode.trim(),
         confirm,
       });
       onDone(res.message);
@@ -525,8 +507,17 @@ function AdminOpenModal({ record, onClose, onDone }: {
         <div className={stepCls}>
           <span className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center shrink-0">2</span>
           <div className="flex-1">
-            <label className="block text-sm font-medium text-gray-700 mb-1">展示企微总群二维码（邀请入群欢迎文字）</label>
-            <input className={inputCls} value={groupQr} onChange={(e) => setGroupQr(e.target.value)} placeholder="粘贴企微总群二维码图片 URL，或填写入群说明/邀请文案" />
+            <label className="block text-sm font-medium text-gray-700 mb-1">展示企微总群二维码（自动获取系统配置地址并展示）</label>
+            <input className={inputCls} value={groupQr} onChange={(e) => setGroupQr(e.target.value)} placeholder="企微总群二维码图片地址（默认已自动获取系统地址）" />
+            {groupQr.trim() ? (
+              <div className="mt-2">
+                <img src={groupQr.trim()} alt="企微总群二维码" className="w-36 h-36 rounded-lg border border-gray-200 object-contain"
+                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                {!groupQr.trim().startsWith('http') && <p className="text-xs text-amber-500 mt-1">当前值不是图片地址，未展示二维码图片</p>}
+              </div>
+            ) : (
+              <p className="text-xs text-amber-500 mt-1">系统未配置企微总群二维码地址，请粘贴二维码图片地址</p>
+            )}
           </div>
         </div>
 
@@ -541,15 +532,15 @@ function AdminOpenModal({ record, onClose, onDone }: {
         <div className={stepCls}>
           <span className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center shrink-0">4</span>
           <div className="flex-1">
-            <label className="block text-sm font-medium text-gray-700 mb-1">展示店铺会员注册码（邀请内购卡注册、激活、绑定个人信息）</label>
-            <input className={inputCls} value={memberQr} onChange={(e) => setMemberQr(e.target.value)} placeholder="粘贴店铺会员注册码 URL，或填写注册邀请说明" />
+            <label className="block text-sm font-medium text-gray-700 mb-1">填写会员代码（内购卡登记使用）</label>
+            <input className={inputCls} value={memberCode} onChange={(e) => setMemberCode(e.target.value)} placeholder="填写员工会员代码" />
           </div>
         </div>
       </div>
 
       {record.status === 'account_ready' && (
         <div className="p-3 rounded-lg bg-indigo-50 border border-indigo-100 text-sm text-indigo-700">
-          该记录账号开通已完成（{record.adminFinishTime}），可修改四项信息后重新保存；如需再次进入待下发状态请点击「提交确认」。
+          该记录已建档完成、入职成功（{record.adminFinishTime}），信息已进入转正管理「待入职」。可修改四项信息后重新保存；提交确认后保持建档完成状态。
         </div>
       )}
 
@@ -561,95 +552,6 @@ function AdminOpenModal({ record, onClose, onDone }: {
         </button>
         <button onClick={() => save(true)} disabled={busy} className="px-5 py-2 rounded-lg bg-blue-600 text-sm text-white hover:bg-blue-700 disabled:opacity-50">
           {busy ? '提交中...' : '四项全部完成，提交确认'}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/* ---------- 15 天考核确认 ---------- */
-function ProbationModal({ record, onClose, onDone }: {
-  record: OnboardingRecord; onClose: () => void; onDone: (msg: string) => void;
-}) {
-  const [result, setResult] = useState<'pass' | 'fail'>('pass');
-  const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
-  const submit = async () => {
-    setErr('');
-    if (result === 'fail' && !reason.trim()) return setErr('请填写考核不通过原因');
-    setBusy(true);
-    try {
-      const res = await confirmProbation(record.id, { result, reason: reason || '' });
-      onDone(res.message);
-    } catch (e: any) { setErr(e?.response?.data?.message || '操作失败'); setBusy(false); }
-  };
-  return (
-    <div className="space-y-4">
-      <div className="p-3 rounded-lg bg-cyan-50 border border-cyan-100 text-sm text-cyan-800">
-        考核期：{record.issueTime || '—'} 起，截止 {record.probationEnd || '—'}。请确认该员工 15 天入职考核结果。
-      </div>
-      <div className="flex gap-2">
-        <button onClick={() => setResult('pass')}
-          className={`px-4 py-2 rounded-lg text-sm font-medium ${result === 'pass' ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-600'}`}>考核合格</button>
-        <button onClick={() => setResult('fail')}
-          className={`px-4 py-2 rounded-lg text-sm font-medium ${result === 'fail' ? 'bg-red-600 text-white' : 'bg-gray-100 text-gray-600'}`}>考核不通过</button>
-      </div>
-      {result === 'fail' && (
-        <div>
-          <label className="block text-sm text-gray-600 mb-1">不通过原因</label>
-          <textarea className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm min-h-20" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="必填" />
-        </div>
-      )}
-      {err && <div className="text-sm text-red-500">{err}</div>}
-      <div className="flex justify-end gap-2">
-        <button onClick={onClose} className="px-4 py-2 rounded-lg border border-gray-300 text-sm text-gray-600">取消</button>
-        <button onClick={submit} disabled={busy}
-          className={`px-5 py-2 rounded-lg text-sm text-white ${result === 'fail' ? 'bg-red-600 hover:bg-red-700' : 'bg-teal-600 hover:bg-teal-700'} disabled:opacity-50`}>
-          {busy ? '提交中...' : result === 'pass' ? '确认考核合格' : '确认考核不通过'}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/* ---------- 督导提交工牌制作申请 ---------- */
-function BadgeModal({ record, onClose, onDone }: {
-  record: OnboardingRecord; onClose: () => void; onDone: (msg: string) => void;
-}) {
-  const [badgeNo, setBadgeNo] = useState('');
-  const [amount, setAmount] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
-  const submit = async () => {
-    setErr('');
-    if (!badgeNo.trim()) return setErr('请填写工牌编号');
-    setBusy(true);
-    try {
-      const res = await applyBadge(record.id, { badgeNo: badgeNo.trim(), amount: amount ? Number(amount) : undefined });
-      onDone(res.message);
-    } catch (e: any) { setErr(e?.response?.data?.message || '操作失败'); setBusy(false); }
-  };
-  return (
-    <div className="space-y-4">
-      <div className="p-3 rounded-lg bg-purple-50 border border-purple-100 text-sm text-purple-800">
-        员工 {record.userName} 已通过 15 天考核，确认后提交工牌制作申请，将自动进入「工牌制作统计台账」。
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="block text-sm text-gray-600 mb-1">工牌编号 <span className="text-red-500">*</span></label>
-          <input className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" value={badgeNo} onChange={(e) => setBadgeNo(e.target.value)} placeholder="如 BD202610001" />
-        </div>
-        <div>
-          <label className="block text-sm text-gray-600 mb-1">预计制作费用（元）</label>
-          <input className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="财务报销凭据" type="number" />
-        </div>
-      </div>
-      {err && <div className="text-sm text-red-500">{err}</div>}
-      <div className="flex justify-end gap-2">
-        <button onClick={onClose} className="px-4 py-2 rounded-lg border border-gray-300 text-sm text-gray-600">取消</button>
-        <button onClick={submit} disabled={busy} className="px-5 py-2 rounded-lg bg-purple-600 text-sm text-white hover:bg-purple-700 disabled:opacity-50">
-          {busy ? '提交中...' : '提交工牌制作申请'}
         </button>
       </div>
     </div>

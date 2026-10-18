@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
-import { Search, Edit2, Trash2, X, Save, RefreshCw, Download, Upload, Plus, AlertTriangle, Link2, Loader2, UserPlus } from 'lucide-react';
+import { Search, Edit2, Trash2, X, Save, RefreshCw, Download, Upload, Plus, AlertTriangle, Link2, Loader2, UserPlus, LogOut } from 'lucide-react';
 import { getUsers, updateUser, deleteUserByCode, createUser, bulkImportUsers, clearUsers } from '../../api/users';
+import { registerResignation, getResignations } from '../../api/resignation';
 import { getPermUsers, saveUserRoles, getOrgTree, getRoles, bindStoreShops } from '../../api/adminPerm';
 import type { User } from '../../types';
 import Layout from '../components/Layout';
@@ -179,6 +180,12 @@ function UserPage() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [userToDelete, setUserToDelete] = useState<User | null>(null);
+  // 离职登记：已离职用户代码集合 + 确认弹窗
+  const [resignedCodes, setResignedCodes] = useState<Set<string>>(new Set());
+  const [showResignConfirm, setShowResignConfirm] = useState(false);
+  const [userToResign, setUserToResign] = useState<User | null>(null);
+  const [resignRemark, setResignRemark] = useState('');
+  const [resigning, setResigning] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [hasData, setHasData] = useState(!!cached);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -268,6 +275,7 @@ function UserPage() {
     if (!pageCache[PAGE_KEY]) {
       loadUsers();
     }
+    loadResigned();
   }, []);
 
   const loadUsers = async () => {
@@ -310,6 +318,44 @@ function UserPage() {
   const handleRefresh = () => {
     clearPageCache(PAGE_KEY);
     loadUsers();
+  };
+
+  // 拉取已离职用户代码集合（用户管理页标记「已离职」标识）
+  const loadResigned = async () => {
+    try {
+      const list = await getResignations();
+      setResignedCodes(new Set(list.map(r => String(r.userCode).trim())));
+    } catch (e) {
+      console.error('加载离职列表失败:', e);
+    }
+  };
+
+  const handleResign = (user: User) => {
+    setResignRemark('');
+    setUserToResign(user);
+    setShowResignConfirm(true);
+  };
+
+  const confirmResign = async () => {
+    if (!userToResign || !userToResign.userCode) return;
+    setResigning(true);
+    try {
+      const res = await registerResignation(userToResign.userCode, resignRemark);
+      alert(res.message || '离职登记成功');
+      setShowResignConfirm(false);
+      setUserToResign(null);
+      if (resignedCodes.size === 0) {
+        setResignedCodes(new Set([String(userToResign.userCode).trim()]));
+      } else {
+        const next = new Set(resignedCodes);
+        next.add(String(userToResign.userCode).trim());
+        setResignedCodes(next);
+      }
+    } catch (err: any) {
+      alert((err?.response?.data?.message || err?.message || '离职登记失败'));
+    } finally {
+      setResigning(false);
+    }
   };
 
   // ---- 权限分配逻辑 ----
@@ -838,21 +884,38 @@ function UserPage() {
                             <Link2 size={16} />
                           </button>
                         )}
-                        <button
-                          onClick={() => handleEdit(userItem)}
-                          className="p-2 text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
-                          title="修改"
-                        >
-                          <Edit2 size={16} />
-                        </button>
-                        {isAdmin && (
-                          <button
-                            onClick={() => handleDelete(userItem)}
-                            className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                            title="删除"
-                          >
-                            <Trash2 size={16} />
-                          </button>
+                        {resignedCodes.has(String(userItem.userCode).trim()) ? (
+                          <span className="px-2 py-1 text-xs rounded-full bg-gray-100 text-gray-500 whitespace-nowrap">
+                            已离职
+                          </span>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => handleEdit(userItem)}
+                              className="p-2 text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                              title="修改"
+                            >
+                              <Edit2 size={16} />
+                            </button>
+                            {isAdmin && (
+                              <>
+                                <button
+                                  onClick={() => handleResign(userItem)}
+                                  className="p-2 text-orange-500 hover:bg-orange-50 rounded-lg transition-colors"
+                                  title="离职登记（进入离职管理）"
+                                >
+                                  <LogOut size={16} />
+                                </button>
+                                <button
+                                  onClick={() => handleDelete(userItem)}
+                                  className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                  title="删除"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </>
+                            )}
+                          </>
                         )}
                       </div>
                     </td>
@@ -992,6 +1055,41 @@ function UserPage() {
                   className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
                 >
                   删除
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showResignConfirm && userToResign && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl p-6 w-full max-w-sm">
+              <h3 className="text-lg font-bold text-gray-800 mb-2">离职登记</h3>
+              <p className="text-gray-600 mb-3">
+                确定将用户「{userToResign.userName}」（{userToResign.userCode}）登记离职吗？
+                登记后将出现在「离职管理」列表中。
+              </p>
+              <textarea
+                value={resignRemark}
+                onChange={(e) => setResignRemark(e.target.value)}
+                placeholder="离职原因/备注（选填）"
+                rows={3}
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary/50 focus:border-primary outline-none text-sm mb-4 resize-none"
+              />
+              <div className="flex gap-3 justify-end">
+                <button
+                  onClick={() => { setShowResignConfirm(false); setUserToResign(null); }}
+                  className="px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={confirmResign}
+                  disabled={resigning}
+                  className="flex items-center gap-2 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
+                >
+                  {resigning ? <Loader2 size={16} className="animate-spin" /> : <LogOut size={16} />}
+                  确认离职
                 </button>
               </div>
             </div>

@@ -1,28 +1,34 @@
 import { Router } from 'express';
+import multer from 'multer';
+import fs from 'fs';
+import path from 'path';
 import sql from 'mssql';
 import { getPool } from '../../config/db';
 import { authMiddleware } from '../middlewares/authMiddleware';
-import { requireMenuPerm } from '../middlewares/menuPermMiddleware';
+import { requireMenuPerm, requireAnyMenuPerm } from '../middlewares/menuPermMiddleware';
 import { dispatchCustomNotification } from '../services/push/PushDispatcher';
 
 /**
- * 入职管理（Onboarding）七阶段流程接口
+ * 入职管理（Onboarding）与转正管理（Regularization）联合流程接口
  * ------------------------------------------------------------
- * 阶段一（公开）：新员工扫码 → GET /options 下拉数据、POST /apply 提交资料（状态 pending_review）
- * 阶段二：督导初审 → POST /records/:id/review（reject 驳回闭环 / approve 同意+定级三要素 → graded）
- * 阶段三：管理层只读监管（GET /records 按管辖范围过滤，无写操作）
- * 阶段四：行政快速建用户 → POST /records/:id/admin-open（建账号+企微群二维码+伯俊备案+会员注册码+提交确认 → account_ready）
- *         内购卡调整提醒 → GET /card-adjust（仅列表；入职自动写 normal_to_inner，离职由离职模块调 insertCardAdjustReminder 写 inner_to_normal）
- * 阶段五：督导下发 → POST /records/:id/issue（account_ready → probation，15 天自动计时）
- * 阶段六：考核期结束 → POST /records/:id/confirm-probation（督导确认考核 → probation_passed）
- *         工牌申请 → POST /records/:id/apply-badge（probation_passed → badge_applied + 写工牌台账）
- * 阶段七：工牌制作/报销闭环 → POST /badge-ledger/:id/submit-making（生成报销单 → badge_making）
- *         POST /reimburse/:id/finance-review（财务核销 → completed 全流程闭环）
+ * 入职阶段（menu: onboarding）：
+ *   阶段一（公开）：新员工扫码 → GET /options 下拉数据、POST /apply 提交资料（状态 pending_review）
+ *   阶段二：督导初审 → POST /records/:id/review（reject 驳回闭环 / approve 同意+定级三要素 → graded）
+ *   阶段三：管理层只读监管（GET /records 按管辖范围过滤，无写操作）
+ *   阶段四：行政快速建用户 → POST /records/:id/admin-open（建账号+企微群二维码+伯俊备案+会员注册码+提交确认 → account_ready）
+ *           account_ready = 建档完成即入职成功；随后信息进入转正管理「待入职」
+ * ------------------------------------------------------------
+ * 转正阶段（menu: regularization，也可由 onboarding 权限兼容调用）：
+ *   阶段五：督导下发 → POST /records/:id/issue（待入职 account_ready → probation，15 天自动计时）
+ *   阶段六：考核期结束 → POST /records/:id/confirm-probation（督导确认考核 → probation_passed 转正通过）
+ *           工牌+企微码申请 → POST /records/:id/apply-badge（probation_passed → badge_applied + 写工牌台账，body 含 wecomQr）
+ *   阶段七：工牌制作/报销闭环（menu: onboardingBadge）→ POST /badge-ledger/:id/submit-making（生成报销单 → badge_making）
+ *           POST /reimburse/:id/finance-review（财务核销 → completed 全流程闭环）
  * ------------------------------------------------------------
  * 定时任务：startOnboardingScheduler() 每分钟扫描
  *   - 第 3 天预警（待督导初审超时提醒，写 onboarding_timeout_log day3）
  *   - 第 7 天超时自动台账记录（day7）
- *   - 15 天考核期到期待办提醒（probation_due）
+ *   - 15 天转正考核期到期待办提醒（probation_due）
  */
 const router = Router();
 
@@ -94,6 +100,7 @@ function normalizeRecord(row: any) {
     adminBojunAccount: row.admin_bojun_account || '',
     adminGroupQr: row.admin_group_qr || '',
     adminMemberQr: row.admin_member_qr || '',
+    memberCode: row.member_code || '',
     adminFinishTime: d(row.admin_finish_time),
     issueTime: d(row.issue_time),
     probationStart: d(row.probation_start),
@@ -103,6 +110,7 @@ function normalizeRecord(row: any) {
     badgeApplyTime: d(row.badge_apply_time),
     badgeNo: row.badge_no || '',
     badgeAmount: row.badge_amount ?? null,
+    wecomQr: row.wecom_qr || '',
     day3Warned: row.day3_warned || 0,
     day7Logged: row.day7_logged || 0,
     remark: row.remark || '',
@@ -152,6 +160,51 @@ router.get('/options', async (_req, res) => {
   } catch (e: any) {
     res.status(500).json({ message: e.message });
   }
+});
+
+// ============================================================
+// 公开：佐证材料图片上传（入职资料附件，返回 /uploads/onboarding/ 相对路径）
+// 权限：公开（扫码页为访客提交，无登录态）；限制类型与大小防滥用
+// ============================================================
+const onboardingUploadDir = path.resolve(process.cwd(), 'uploads', 'onboarding');
+const onboardingUpload = multer({
+  storage: multer.diskStorage({
+    destination(_req: any, _file: any, cb: any) {
+      if (!fs.existsSync(onboardingUploadDir)) fs.mkdirSync(onboardingUploadDir, { recursive: true });
+      cb(null, onboardingUploadDir);
+    },
+    filename(_req: any, file: any, cb: any) {
+      const ext = (path.extname(file.originalname) || '.jpg').toLowerCase();
+      cb(null, `onb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`);
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter(_req: any, file: any, cb: any) {
+    if (!/^image\/(jpeg|png|gif|webp)$/i.test(file.mimetype || '')) {
+      return cb(new Error('仅支持 jpg/png/gif/webp 格式图片'));
+    }
+    cb(null, true);
+  },
+});
+
+router.post('/upload', (req, res) => {
+  onboardingUpload.single('file')(req as any, res as any, (err: any) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ message: '图片不能超过 5MB，请压缩后重试' });
+      }
+      const msg = err.message || '上传失败';
+      if (/格式/.test(msg)) return res.status(400).json({ message: msg });
+      return res.status(400).json({ message: '图片上传失败：' + msg });
+    }
+    try {
+      const f = (req as any).file;
+      if (!f) return res.status(400).json({ message: '未接收到图片文件' });
+      res.json({ ok: true, url: `/uploads/onboarding/${f.filename}` });
+    } catch (e: any) {
+      return res.status(500).json({ message: '图片上传失败：' + (e.message || '未知错误') });
+    }
+  });
 });
 
 // ============================================================
@@ -277,16 +330,21 @@ async function buildScopeFilter(pool: sql.ConnectionPool, user: any): Promise<Sc
   return noCond;
 }
 
-router.get('/records', authMiddleware, requireMenuPerm('baseInfo', 'onboarding'), async (req, res) => {
+router.get('/records', authMiddleware, requireAnyMenuPerm('baseInfo', ['onboarding', 'regularization']), async (req, res) => {
   try {
     const { status } = req.query;
     const pool = await getPool();
     const scope = await buildScopeFilter(pool, (req as any).user);
     const where: string[] = [];
     const params: { name: string; type: any; value: any }[] = [];
-    if (typeof status === 'string' && (VALID_STATUSES as readonly string[]).includes(status)) {
-      where.push('r.status = @status');
-      params.push({ name: 'status', type: sql.NVarChar, value: status });
+    // 支持逗号分隔多状态过滤（如 account_ready,probation —— 转正管理「待入职+考核中」视图）
+    if (typeof status === 'string' && status.trim()) {
+      const statuses = status.split(',').map((s) => s.trim()).filter((s) => (VALID_STATUSES as readonly string[]).includes(s));
+      if (statuses.length > 0) {
+        const ph = statuses.map((_, i) => `@st${i}`).join(',');
+        where.push(`r.status IN (${ph})`);
+        statuses.forEach((s, i) => params.push({ name: `st${i}`, type: sql.NVarChar, value: s }));
+      }
     }
     if (scope.cond !== '1=1') where.push(scope.cond);
     for (const p of scope.params) params.push(p);
@@ -314,7 +372,7 @@ router.get('/records', authMiddleware, requireMenuPerm('baseInfo', 'onboarding')
 // ============================================================
 // 管理：入职记录详情
 // ============================================================
-router.get('/records/:id', authMiddleware, requireMenuPerm('baseInfo', 'onboarding'), async (req, res) => {
+router.get('/records/:id', authMiddleware, requireAnyMenuPerm('baseInfo', ['onboarding', 'regularization']), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: '记录ID无效' });
@@ -467,6 +525,7 @@ router.post('/records/:id/admin-open', authMiddleware, requireMenuPerm('baseInfo
     const bojunAccount = String(body.bojunAccount || '').trim();
     const groupQr = String(body.groupQr || '').trim();
     const memberQr = String(body.memberQr || '').trim();
+    const memberCode = String(body.memberCode || '').trim();
     const password = String(body.password || '').trim() || '8888';
     const confirm = body.confirm === true;
 
@@ -514,6 +573,7 @@ router.post('/records/:id/admin-open', authMiddleware, requireMenuPerm('baseInfo
         groupQr,
         bojunAccount,
         memberQr,
+        memberCode,
         confirm,
         adminBy: user.userName || user.userCode || '',
       });
@@ -523,12 +583,14 @@ router.post('/records/:id/admin-open', authMiddleware, requireMenuPerm('baseInfo
         .input('bojun', sql.NVarChar, bojunAccount)
         .input('groupQr', sql.NVarChar, groupQr)
         .input('memberQr', sql.NVarChar, memberQr)
+        .input('memberCode', sql.NVarChar, memberCode)
         .input('admin4', sql.NVarChar, admin4)
         .input('finish', sql.Bit, confirm)
         .query(`
           UPDATE onboarding_record
           SET admin_user_code = @uc2, admin_bojun_account = @bojun,
               admin_group_qr = @groupQr, admin_member_qr = @memberQr,
+              member_code = @memberCode,
               admin4_json = @admin4,
               admin_finish_time = CASE WHEN @finish = 1 THEN GETDATE() ELSE admin_finish_time END,
               status = CASE WHEN @finish = 1 THEN 'account_ready' ELSE status END,
@@ -536,12 +598,14 @@ router.post('/records/:id/admin-open', authMiddleware, requireMenuPerm('baseInfo
           WHERE id = @id
         `);
       await tx.commit();
-      // 四项完成后自动生成内购卡调整提醒（普卡 → 内购卡）
+      // 四项完成后自动生成内购卡调整提醒（普卡 → 内购卡），携带手机号与会员代码
       if (confirm) {
         try {
           await insertCardAdjustReminder(pool, {
             userName: row.user_name,
             userCode: adminUserCode,
+            phone: row.phone || '',
+            memberCode,
             adjustType: 'normal_to_inner',
             reason: '新员工入职账号开通，需普卡转内购卡',
             submitter: user.userName || user.userCode || '',
@@ -553,7 +617,7 @@ router.post('/records/:id/admin-open', authMiddleware, requireMenuPerm('baseInfo
       res.json({
         ok: true,
         message: confirm
-          ? '账号开通完成，待账号下发（已同步新增内购卡调整提醒）'
+          ? '建档完成，员工入职成功（信息已进入转正管理「待入职」，已同步新增内购卡调整提醒）'
           : '开通信息已保存（四项未全部完成，待提交确认）',
         adminUserCode,
       });
@@ -568,9 +632,10 @@ router.post('/records/:id/admin-open', authMiddleware, requireMenuPerm('baseInfo
 });
 
 // ============================================================
-// 管理：阶段五 督导账号下发（account_ready → probation，自动进入 15 天考核期计时）
+// 管理：阶段五 督导账号下发（account_ready → probation，自动进入 15 天转正考核期计时）
+// 说明：建档完成后员工信息已进入转正管理「待入职」；由督导在转正管理中下发开启考核。
 // ============================================================
-router.post('/records/:id/issue', authMiddleware, requireMenuPerm('baseInfo', 'onboarding'), async (req, res) => {
+router.post('/records/:id/issue', authMiddleware, requireAnyMenuPerm('baseInfo', ['onboarding', 'regularization']), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: '记录ID无效' });
   try {
@@ -578,7 +643,7 @@ router.post('/records/:id/issue', authMiddleware, requireMenuPerm('baseInfo', 'o
     const found = await loadRecord(pool, id);
     if (found.recordset.length === 0) return res.status(404).json({ message: '记录不存在' });
     const row = found.recordset[0];
-    if (row.status !== 'account_ready') return res.status(409).json({ message: '该记录不在「账号开通完成待下发」状态' });
+    if (row.status !== 'account_ready') return res.status(409).json({ message: '该记录不在「待入职」状态' });
     await pool.request()
       .input('id', sql.Int, id)
       .query(`
@@ -588,18 +653,18 @@ router.post('/records/:id/issue', authMiddleware, requireMenuPerm('baseInfo', 'o
             update_time = GETDATE()
         WHERE id = @id
       `);
-    // 推动给新员工（无企微号则记录在案，由督导转达）
-    res.json({ ok: true, message: '账号已下发，新员工进入 15 天入职考核期（系统自动计时）' });
+    // 转正管理：下发账号后员工进入 15 天转正考核期（原「推动给新员工」逻辑已并入转正流程）
+    res.json({ ok: true, message: '账号已下发，员工进入 15 天转正考核期（系统自动计时）' });
   } catch (e: any) {
     res.status(500).json({ message: e.message });
   }
 });
 
 // ============================================================
-// 管理：阶段六 督导确认考核（probation → probation_passed，展示【制作工牌】按钮）
+// 管理：阶段六 督导确认考核（probation → probation_passed，转正通过，展示【制作工牌/企微码】按钮）
 // body: { result: 'pass' | 'fail', reason? }
 // ============================================================
-router.post('/records/:id/confirm-probation', authMiddleware, requireMenuPerm('baseInfo', 'onboarding'), async (req, res) => {
+router.post('/records/:id/confirm-probation', authMiddleware, requireAnyMenuPerm('baseInfo', ['onboarding', 'regularization']), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: '记录ID无效' });
   const body = req.body || {};
@@ -620,7 +685,7 @@ router.post('/records/:id/confirm-probation', authMiddleware, requireMenuPerm('b
               reject_reason = @reason, update_time = GETDATE()
           WHERE id = @id
         `);
-      return res.json({ ok: true, message: '考核不通过，入职流程终止，数据留存备查' });
+      return res.json({ ok: true, message: '考核不通过，转正流程终止，数据留存备查' });
     }
     await pool.request().input('id', sql.Int, id).input('by', sql.NVarChar, user.userName || user.userCode || '')
       .query(`
@@ -629,7 +694,7 @@ router.post('/records/:id/confirm-probation', authMiddleware, requireMenuPerm('b
             update_time = GETDATE()
         WHERE id = @id
       `);
-    res.json({ ok: true, message: '考核通过，已进入工牌制作环节（可提交制作工牌申请）' });
+    res.json({ ok: true, message: '考核通过，员工已转正，可制作工牌与企微码' });
   } catch (e: any) {
     res.status(500).json({ message: e.message });
   }
@@ -637,9 +702,9 @@ router.post('/records/:id/confirm-probation', authMiddleware, requireMenuPerm('b
 
 // ============================================================
 // 管理：阶段六 督导提交工牌制作申请（probation_passed → badge_applied + 写工牌台账）
-// body: { badgeNo, amount }
+// body: { badgeNo, amount, wecomQr } —— wecomQr 为员工个人企微二维码（转正后制作企微码）
 // ============================================================
-router.post('/records/:id/apply-badge', authMiddleware, requireMenuPerm('baseInfo', 'onboarding'), async (req, res) => {
+router.post('/records/:id/apply-badge', authMiddleware, requireAnyMenuPerm('baseInfo', ['onboarding', 'regularization']), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: '记录ID无效' });
   const body = req.body || {};
@@ -652,6 +717,7 @@ router.post('/records/:id/apply-badge', authMiddleware, requireMenuPerm('baseInf
     if (row.status !== 'probation_passed') return res.status(409).json({ message: '该记录未通过考核或已提交工牌申请' });
     const badgeNo = String(body.badgeNo || '').trim();
     const amount = Number(body.amount);
+    const wecomQr = String(body.wecomQr || '').trim();
     const tx = new sql.Transaction(pool);
     await tx.begin();
     try {
@@ -659,11 +725,12 @@ router.post('/records/:id/apply-badge', authMiddleware, requireMenuPerm('baseInf
         .input('id', sql.Int, id)
         .input('badgeNo', sql.NVarChar, badgeNo)
         .input('amount', sql.Decimal(10, 2), Number.isFinite(amount) && amount > 0 ? amount : 0)
+        .input('wecomQr', sql.NVarChar, wecomQr)
         .input('user', sql.NVarChar, user.userName || user.userCode || '')
         .query(`
           UPDATE onboarding_record
           SET status = 'badge_applied', badge_apply_time = GETDATE(), badge_no = @badgeNo,
-              badge_amount = @amount, update_time = GETDATE()
+              badge_amount = @amount, wecom_qr = @wecomQr, update_time = GETDATE()
           WHERE id = @id
         `);
       await tx.request()
@@ -674,12 +741,13 @@ router.post('/records/:id/apply-badge', authMiddleware, requireMenuPerm('baseInf
         .input('shopName', sql.NVarChar, row.shop_name || '')
         .input('level', sql.NVarChar, row.level || '')
         .input('badgeNo2', sql.NVarChar, badgeNo)
+        .input('amount', sql.Decimal(10, 2), Number.isFinite(amount) && amount > 0 ? amount : 0)
         .query(`
           INSERT INTO onboarding_badge_ledger (record_id, apply_no, user_name, phone, shop_name, level, badge_no, status, amount)
           VALUES (@rid, @applyNo, @userName, @phone, @shopName, @level, @badgeNo2, 'pending', @amount)
         `);
       await tx.commit();
-      res.json({ ok: true, message: '工牌制作申请已提交，已进入工牌制作统计台账' });
+      res.json({ ok: true, message: '工牌及企微码制作申请已提交，已进入工牌制作统计台账' });
     } catch (txErr: any) {
       await tx.rollback();
       throw txErr;
@@ -814,6 +882,92 @@ router.post('/badge-ledger/:id/submit-making', authMiddleware, requireMenuPerm('
 });
 
 // ============================================================
+// 管理：批量提交广告公司制作（台账勾选多条 → 统一广告公司、逐条金额 → 每人生成报销单 → badge_making）
+// body: { ids: number[], maker: string, amounts: { [ledgerId]: number }, remark?: string }
+// ============================================================
+router.post('/badge-ledger/batch-submit-making', authMiddleware, requireMenuPerm('baseInfo', 'onboardingBadge'), async (req, res) => {
+  const body = req.body || {};
+  const ids: number[] = Array.isArray(body.ids) ? body.ids.map(Number).filter((n: number) => Number.isInteger(n) && n > 0) : [];
+  if (ids.length === 0) return res.status(400).json({ message: '请先勾选需要制作工牌的记录' });
+  if (ids.length > 100) return res.status(400).json({ message: '单次批量制作最多 100 条' });
+  const user: any = (req as any).user;
+  // 行政/HR/系统管理员才可提交广告公司制作
+  const roleCodes: string[] = (user.roleCodes || []).filter((c: any) => typeof c === 'string');
+  if (!roleCodes.some((r) => ['admin_staff', 'hr_staff', 'hr', 'data_admin', 'super_admin', 'it'].includes(r))) {
+    return res.status(403).json({ message: '仅行政专员/HR可提交工牌制作' });
+  }
+  const maker = String(body.maker || '').trim();
+  if (!maker) return res.status(400).json({ message: '请填写广告公司名称' });
+  const rawAmounts: Record<number, number> = {};
+  (Object.keys(body.amounts || {}) as string[]).forEach((k) => {
+    const key = Number(k);
+    if (Number.isInteger(key) && key > 0) rawAmounts[key] = Number(body.amounts[k]);
+  });
+  try {
+    const pool = await getPool();
+    const tx = new sql.Transaction(pool);
+    await tx.begin();
+    const doneNos: string[] = [];
+    const failed: string[] = [];
+    try {
+      for (const id of ids) {
+        const led = await tx.request().input('id', sql.Int, id)
+          .query(`SELECT * FROM onboarding_badge_ledger WHERE id = @id`);
+        if (led.recordset.length === 0) { failed.push(`台账#${id}不存在`); continue; }
+        const row = led.recordset[0];
+        if (row.status !== 'pending') { failed.push(`${row.user_name || '#' + id} 不在待制作状态`); continue; }
+        const amount = Number(rawAmounts[id]);
+        const finalAmount = Number.isFinite(amount) && amount > 0 ? amount : (row.amount ?? 0);
+        if (finalAmount <= 0) { failed.push(`${row.user_name || '#' + id} 制作费用无效`); continue; }
+        const reimburseNo = genReimburseNo();
+
+        await tx.request()
+          .input('id', sql.Int, id)
+          .input('maker', sql.NVarChar, maker)
+          .input('amount', sql.Decimal(10, 2), finalAmount)
+          .input('remark', sql.NVarChar, String(body.remark || '').trim())
+          .query(`
+            UPDATE onboarding_badge_ledger
+            SET status = 'making', maker = @maker, amount = @amount,
+                submit_make_time = GETDATE(), remark = @remark, update_time = GETDATE()
+            WHERE id = @id
+          `);
+        await tx.request()
+          .input('ledgerId', sql.Int, id)
+          .input('recordId', sql.Int, row.record_id)
+          .input('reimburseNo', sql.NVarChar, reimburseNo)
+          .input('amount2', sql.Decimal(10, 2), finalAmount)
+          .query(`
+            INSERT INTO onboarding_reimburse (ledger_id, record_id, reimburse_no, amount, status)
+            VALUES (@ledgerId, @recordId, @reimburseNo, @amount2, 'pending')
+          `);
+        await tx.request()
+          .input('recordId', sql.Int, row.record_id)
+          .query(`
+            UPDATE onboarding_record
+            SET status = 'badge_making', update_time = GETDATE()
+            WHERE id = @recordId
+          `);
+        doneNos.push(reimburseNo);
+      }
+      if (doneNos.length === 0) {
+        await tx.rollback();
+        return res.status(409).json({ message: '批量提交未成功：' + failed.join('；') });
+      }
+      await tx.commit();
+      const suffix = failed.length > 0 ? `；跳过 ${failed.length} 条（${failed.join('；')}）` : '';
+      res.json({ ok: true, message: `已批量提交 ${doneNos.length} 条工牌制作，报销单已自动生成并流转财务审批${suffix}` });
+    } catch (txErr: any) {
+      await tx.rollback();
+      throw txErr;
+    }
+  } catch (e: any) {
+    console.error('[Onboarding] 批量提交广告公司制作失败:', e.message);
+    res.status(500).json({ message: '批量提交失败：' + (e.message || '未知错误') });
+  }
+});
+
+// ============================================================
 // 管理：财务报销单列表（pending/approved/settled）
 // ============================================================
 router.get('/reimburse', authMiddleware, requireMenuPerm('baseInfo', 'onboardingBadge'), async (req, res) => {
@@ -915,7 +1069,7 @@ router.post('/reimburse/:id/finance-review', authMiddleware, requireMenuPerm('ba
           WHERE id = @recordId
         `);
       await tx.commit();
-      res.json({ ok: true, message: '报销单已核销，入职流程全部完成（全流程闭环留痕）' });
+      res.json({ ok: true, message: '报销单已核销，转正流程全部完成（全流程闭环留痕）' });
     } catch (txErr: any) {
       await tx.rollback();
       throw txErr;
@@ -941,7 +1095,10 @@ router.post('/reimburse/:id/finance-review', authMiddleware, requireMenuPerm('ba
  */
 export async function insertCardAdjustReminder(
   pool: sql.ConnectionPool,
-  data: { userName: string; userCode?: string; adjustType: 'normal_to_inner' | 'inner_to_normal'; reason?: string; submitter?: string },
+  data: {
+    userName: string; userCode?: string; phone?: string; memberCode?: string;
+    adjustType: 'normal_to_inner' | 'inner_to_normal'; reason?: string; submitter?: string;
+  },
 ): Promise<boolean> {
   const userName = String(data.userName || '').trim();
   if (!userName) throw new Error('内购卡调整提醒缺少员工姓名');
@@ -951,12 +1108,14 @@ export async function insertCardAdjustReminder(
   await pool.request()
     .input('userName', sql.NVarChar, userName)
     .input('userCode', sql.NVarChar, String(data.userCode || '').trim())
+    .input('phone', sql.NVarChar, String(data.phone || '').trim())
+    .input('memberCode', sql.NVarChar, String(data.memberCode || '').trim())
     .input('adjustType', sql.NVarChar, data.adjustType)
     .input('reason', sql.NVarChar, String(data.reason || '').trim())
     .input('submitter', sql.NVarChar, String(data.submitter || '').trim())
     .query(`
-      INSERT INTO onboarding_card_adjust (user_name, user_code, adjust_type, reason, submitter, status)
-      VALUES (@userName, @userCode, @adjustType, @reason, @submitter, 'pending')
+      INSERT INTO onboarding_card_adjust (user_name, user_code, phone, member_code, adjust_type, reason, submitter, status)
+      VALUES (@userName, @userCode, @phone, @memberCode, @adjustType, @reason, @submitter, 'pending')
     `);
   return true;
 }
@@ -983,17 +1142,53 @@ router.get('/card-adjust', authMiddleware, requireMenuPerm('baseInfo', 'onboardi
       id: row.id,
       userName: row.user_name || '',
       userCode: row.user_code || '',
+      phone: row.phone || '',
+      memberCode: row.member_code || '',
       adjustType: row.adjust_type || '',
       adjustTypeLabel: row.adjust_type === 'normal_to_inner' ? '新员工普卡转内购卡' : row.adjust_type === 'inner_to_normal' ? '离职内购卡转普卡' : row.adjust_type || '',
       reason: row.reason || '',
       submitter: row.submitter || '',
       status: row.status || 'pending',
+      handler: row.handler || '',
       handleTime: row.handle_time ? new Date(row.handle_time).toLocaleString('zh-CN', { hour12: false }) : '',
       remark: row.remark || '',
       createTime: row.create_time ? new Date(row.create_time).toLocaleString('zh-CN', { hour12: false }) : '',
     })) });
   } catch (e: any) {
     res.status(500).json({ message: e.message });
+  }
+});
+
+// ============================================================
+// 管理：内购卡调整「确认已处理」（会员专员在会员系统完成普卡↔内购卡调整后回填状态）
+// body: { remark? }
+// ============================================================
+router.post('/card-adjust/:id/mark-done', authMiddleware, requireMenuPerm('baseInfo', 'onboardingCardAdjust'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: '记录ID无效' });
+  const user: any = (req as any).user;
+  const remark = String((req.body || {}).remark || '').trim();
+  try {
+    const pool = await getPool();
+    const found = await pool.request().input('id', sql.Int, id)
+      .query(`SELECT id, status FROM onboarding_card_adjust WHERE id = @id`);
+    if (found.recordset.length === 0) return res.status(404).json({ message: '调整记录不存在' });
+    if (found.recordset[0].status === 'done') return res.status(409).json({ message: '该记录已标记为已处理' });
+    const q = pool.request()
+      .input('id', sql.Int, id)
+      .input('handler', sql.NVarChar, user.userName || user.userCode || '')
+      .input('remark', sql.NVarChar, remark);
+    await q.query(`
+      UPDATE onboarding_card_adjust
+      SET status = 'done', handle_time = GETDATE(), handler = @handler,
+          remark = CASE WHEN @remark = '' THEN remark ELSE @remark END,
+          update_time = GETDATE()
+      WHERE id = @id
+    `);
+    res.json({ ok: true, message: '已确认处理' });
+  } catch (e: any) {
+    console.error('[Onboarding] 内购卡调整确认处理失败:', e.message);
+    res.status(500).json({ message: '确认失败：' + (e.message || '未知错误') });
   }
 });
 
@@ -1013,7 +1208,7 @@ router.get('/timeout-logs', authMiddleware, requireMenuPerm('baseInfo', 'onboard
       recordId: row.record_id,
       applyNo: row.apply_no || '',
       warnType: row.warn_type || '',
-      warnTypeLabel: row.warn_type === 'day3' ? '第3天预警' : row.warn_type === 'day7' ? '第7天超时台账' : row.warn_type === 'probation_due' ? '15天考核到期' : row.warn_type || '',
+      warnTypeLabel: row.warn_type === 'day3' ? '第3天预警' : row.warn_type === 'day7' ? '第7天超时台账' : row.warn_type === 'probation_due' ? '15天转正考核到期' : row.warn_type || '',
       warnTime: row.warn_time ? new Date(row.warn_time).toLocaleString('zh-CN', { hour12: false }) : '',
       content: row.content || '',
       userName: row.user_name || '',
@@ -1097,10 +1292,10 @@ async function checkOnboardingTimeouts() {
         .input('userName', sql.NVarChar, r.user_name)
         .query(`
           INSERT INTO onboarding_timeout_log (record_id, apply_no, user_name, warn_type, content)
-          VALUES (@rid, @applyNo, @userName, 'probation_due', '15 天入职考核期已满，请督导确认考核结果并进入工牌环节')
+          VALUES (@rid, @applyNo, @userName, 'probation_due', '15 天转正考核期已满，请督导确认考核结果并进入工牌/企微码环节')
         `).catch(() => {});
-      await notifyUserByCode(pool, r.supervisor_code, '入职考核期到期',
-        `【考核期到期】员工 ${r.user_name}（${r.apply_no}）15 天入职考核期已满，请确认考核结果。`);
+      await notifyUserByCode(pool, r.supervisor_code, '转正考核期到期',
+        `【考核期到期】员工 ${r.user_name}（${r.apply_no}）15 天转正考核期已满，请确认考核结果。`);
     }
   } catch (e: any) {
     console.error('[Onboarding] 考核期到期扫描失败:', e.message);

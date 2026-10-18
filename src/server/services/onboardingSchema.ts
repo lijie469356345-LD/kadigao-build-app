@@ -31,10 +31,27 @@ async function tableExists(pool: sql.ConnectionPool, name: string): Promise<bool
   return (r.recordset?.[0]?.cnt ?? 0) > 0;
 }
 
-/** 入职记录主表（一人一记录，手机号唯一，被驳回后允许重新提交） */
+/** 入职记录主表（一人一记录，手机号唯一，被驳回后允许重新提交）
+ *  注意：建档完成（account_ready）即入职成功，随后转入转正管理（待入职 → 考核 → 转正 → 工牌/企微码/报销） */
 async function ensureTableOnboardingRecord(pool: sql.ConnectionPool) {
   const name = 'onboarding_record';
-  if (await tableExists(pool, name)) return;
+  if (await tableExists(pool, name)) {
+    // 幂等补列 1：转正后需登记员工个人企微二维码（wecom_qr）
+    const col = await pool.request().query(
+      `SELECT COUNT(*) AS cnt FROM sys.columns WHERE object_id = OBJECT_ID('onboarding_record') AND name = 'wecom_qr'`);
+    if ((col.recordset?.[0]?.cnt ?? 0) === 0) {
+      await pool.request().query(`ALTER TABLE onboarding_record ADD wecom_qr NVARCHAR(MAX) NULL`);
+      console.log('[Onboarding] 表 onboarding_record 追加列 wecom_qr 完成');
+    }
+    // 幂等补列 2：快速建用户需登记会员代码（member_code）
+    const col2 = await pool.request().query(
+      `SELECT COUNT(*) AS cnt FROM sys.columns WHERE object_id = OBJECT_ID('onboarding_record') AND name = 'member_code'`);
+    if ((col2.recordset?.[0]?.cnt ?? 0) === 0) {
+      await pool.request().query(`ALTER TABLE onboarding_record ADD member_code NVARCHAR(100) NULL`);
+      console.log('[Onboarding] 表 onboarding_record 追加列 member_code 完成');
+    }
+    return;
+  }
   await pool.request().query(`
     CREATE TABLE onboarding_record (
       id INT IDENTITY(1,1) PRIMARY KEY,
@@ -69,6 +86,7 @@ async function ensureTableOnboardingRecord(pool: sql.ConnectionPool) {
       admin_bojun_account NVARCHAR(100) NULL,       -- 快速建用户：伯俊账号
       admin_group_qr NVARCHAR(MAX) NULL,            -- 快速建用户：企微总群二维码（URL/说明）
       admin_member_qr NVARCHAR(MAX) NULL,           -- 快速建用户：店铺会员注册码（URL/说明）
+      member_code NVARCHAR(100) NULL,               -- 快速建用户：会员代码（内购卡调整用）
       admin4_json NVARCHAR(MAX) NULL,               -- 四项开通确认明细 JSON
       admin_finish_time DATETIME NULL,              -- 行政提交确认时间
       issue_time DATETIME NULL,                     -- 督导下发时间（进入15天考核）
@@ -79,6 +97,7 @@ async function ensureTableOnboardingRecord(pool: sql.ConnectionPool) {
       badge_apply_time DATETIME NULL,               -- 督导提交工牌制作申请时间
       badge_no NVARCHAR(50) NULL,                   -- 工牌编号
       badge_amount DECIMAL(10,2) NULL,              -- 工牌制作费用
+      wecom_qr NVARCHAR(MAX) NULL,                  -- 转正后：员工个人企微二维码（URL/说明）
       day3_warned INT NOT NULL DEFAULT 0,           -- 第3天预警已提醒标记
       day7_logged INT NOT NULL DEFAULT 0,           -- 第7天超时台账已记录标记
       remark NVARCHAR(500) NULL,
@@ -180,16 +199,30 @@ async function ensureTableReimburse(pool: sql.ConnectionPool) {
 /** 内购卡调整提醒（由会员专员在会员系统实际处理，本系统仅收集/展示，不执行业务） */
 async function ensureTableCardAdjust(pool: sql.ConnectionPool) {
   const name = 'onboarding_card_adjust';
-  if (await tableExists(pool, name)) return;
+  if (await tableExists(pool, name)) {
+    // 幂等补列：内购卡调整需展示手机号、会员代码；确认已处理需记录处理人
+    for (const col of ['phone', 'member_code', 'handler']) {
+      const c = await pool.request().input('col', sql.NVarChar, col)
+        .query(`SELECT COUNT(*) AS cnt FROM sys.columns WHERE object_id = OBJECT_ID('onboarding_card_adjust') AND name = @col`);
+      if ((c.recordset?.[0]?.cnt ?? 0) === 0) {
+        await pool.request().query(`ALTER TABLE onboarding_card_adjust ADD ${col} NVARCHAR(100) NULL`);
+        console.log(`[Onboarding] 表 onboarding_card_adjust 追加列 ${col} 完成`);
+      }
+    }
+    return;
+  }
   await pool.request().query(`
     CREATE TABLE onboarding_card_adjust (
       id INT IDENTITY(1,1) PRIMARY KEY,
       user_name NVARCHAR(50) NOT NULL,
       user_code NVARCHAR(50) NULL,                  -- 系统账号（若有）
+      phone NVARCHAR(20) NULL,                      -- 手机号（调整时展示）
+      member_code NVARCHAR(100) NULL,               -- 会员代码（调整时展示）
       adjust_type NVARCHAR(20) NOT NULL,            -- normal_to_inner 新员工普卡转内购卡 / inner_to_normal 离职内购卡转普卡
       reason NVARCHAR(500) NULL,
       submitter NVARCHAR(50) NULL,                  -- 提交人
       status NVARCHAR(20) NOT NULL DEFAULT 'pending', -- pending 待会员专员处理 / done 已处理
+      handler NVARCHAR(50) NULL,                    -- 处理人（确认已处理时记录）
       handle_time DATETIME NULL,
       remark NVARCHAR(500) NULL,
       create_time DATETIME NOT NULL DEFAULT GETDATE(),

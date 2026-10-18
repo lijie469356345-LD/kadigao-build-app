@@ -5,6 +5,7 @@ import { useAuthStore } from '../store/authStore'
 import { getMaintenanceStatus } from '../api/logs'
 
 // 立即需要的页面（小体积，不走懒加载）
+import UpdateStatusBanner from './components/UpdateStatusBanner'
 import MaintenancePage from './pages/MaintenancePage'
 import DataExtractionPage from './pages/DataExtractionPage'
 import BestSellerPage from './pages/BestSellerPage'
@@ -17,12 +18,15 @@ import DailyTargetUploadPage from './pages/DailyTargetUploadPage'
 
 // 懒加载所有页面 —— 每个页面会被拆成独立的 JS chunk
 const LoginPage = lazy(() => import('./pages/LoginPage'))
+const DownloadCenterPage = lazy(() => import('./pages/DownloadCenterPage'))
 const RegisterPage = lazy(() => import('./pages/RegisterPage'))
 const RegisterAuditPage = lazy(() => import('./pages/RegisterAuditPage'))
 const OnboardingApplyPage = lazy(() => import('./pages/OnboardingApplyPage'))
 const OnboardingManagePage = lazy(() => import('./pages/OnboardingManagePage'))
+const RegularizationManagePage = lazy(() => import('./pages/RegularizationManagePage'))
 const OnboardingBadgePage = lazy(() => import('./pages/OnboardingBadgePage'))
 const OnboardingCardAdjustPage = lazy(() => import('./pages/OnboardingCardAdjustPage'))
+const ResignationPage = lazy(() => import('./pages/ResignationPage'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const PortalPage = lazy(() => import('./pages/PortalPage'))
 const SystemPage = lazy(() => import('./pages/SystemPage'))
@@ -176,6 +180,34 @@ function App() {
     checkMaintenance()
   }, [])
 
+  // 超过 10 分钟无任何操作（点击/触摸/按键/滚动等）自动回到登录页：
+  // 记录最近活动时间，每 30 秒检查一次；App 从后台切回前台时立即检查，
+  // 覆盖手机锁屏/切后台超过 10 分钟再回来的场景。超时后 logout() 清登录态，
+  // 路由守卫与根路径自动跳转登录页。仅登录状态下启用计时。
+  useEffect(() => {
+    if (!isLoggedIn) return
+    const IDLE_TIMEOUT_MS = 10 * 60 * 1000
+    let lastActivity = Date.now()
+    const markActive = () => { lastActivity = Date.now() }
+    const checkIdle = () => {
+      if (Date.now() - lastActivity >= IDLE_TIMEOUT_MS) {
+        useAuthStore.getState().logout()
+      }
+    }
+    const events = ['click', 'touchstart', 'keydown', 'mousemove', 'scroll', 'wheel']
+    events.forEach((e) => window.addEventListener(e, markActive, { passive: true }))
+    const timer = window.setInterval(checkIdle, 30 * 1000)
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') checkIdle()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, markActive))
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [isLoggedIn])
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-100">
@@ -188,10 +220,12 @@ function App() {
     return <MaintenancePage />
   }
 
-  return (
+return (
     <Suspense fallback={<PageFallback />}>
+      <UpdateStatusBanner />
       <Routes>
 <Route path="/login" element={<LoginPage />} />
+        <Route path="/download-center" element={<DownloadCenterPage />} />
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/onboarding-apply" element={<OnboardingApplyPage />} />
         <Route path="/public-feedback" element={<PublicEntryPage />} />
@@ -687,9 +721,9 @@ function App() {
         <Route path="/base/onboarding" element={<ProtectedRoute><OnboardingManagePage /></ProtectedRoute>} />
         <Route path="/base/onboarding-badge" element={<ProtectedRoute><OnboardingBadgePage /></ProtectedRoute>} />
         <Route path="/base/onboarding-card-adjust" element={<ProtectedRoute><OnboardingCardAdjustPage /></ProtectedRoute>} />
-        <Route path="/base/regularization" element={<ProtectedRoute><PlaceholderPage title="转正管理" portalCn="基础资料" /></ProtectedRoute>} />
+        <Route path="/base/regularization" element={<ProtectedRoute><RegularizationManagePage /></ProtectedRoute>} />
         <Route path="/base/transfer" element={<ProtectedRoute><PlaceholderPage title="调岗管理" portalCn="基础资料" /></ProtectedRoute>} />
-        <Route path="/base/resignation" element={<ProtectedRoute><PlaceholderPage title="离职管理" portalCn="基础资料" /></ProtectedRoute>} />
+        <Route path="/base/resignation" element={<ProtectedRoute><ResignationPage /></ProtectedRoute>} />
         {/* ===== 新层级框架占位路由：考勤（人事绩效） ===== */}
         <Route path="/attendance/clock-in" element={<ProtectedRoute><PlaceholderPage title="打卡" portalCn="考勤" /></ProtectedRoute>} />
         <Route path="/attendance/schedule" element={<ProtectedRoute><PlaceholderPage title="排班" portalCn="考勤" /></ProtectedRoute>} />

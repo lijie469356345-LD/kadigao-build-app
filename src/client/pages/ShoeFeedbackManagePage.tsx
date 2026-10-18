@@ -602,6 +602,9 @@ function ShoeFeedbackManagePage() {
                 <span className="text-gray-400">手机号：</span>{detail.submitterPhone || '-'}
               </p>
               <p className="text-sm text-gray-700 mt-1">
+                <span className="text-gray-400">客户已过期：</span>{detail.expiredTicketCount ?? '-'} 张
+              </p>
+              <p className="text-sm text-gray-700 mt-1">
                 <span className="text-gray-400">预估补发：</span>{detail.estimatedTickets ?? 0} 张
               </p>
             </div>
@@ -698,6 +701,9 @@ function ShoeFeedbackManagePage() {
               </p>
               <p className="text-sm text-gray-700 mt-1">
                 <span className="text-gray-400">手机号：</span>{detail.submitterPhone || '-'}
+              </p>
+              <p className="text-sm text-gray-700 mt-1">
+                <span className="text-gray-400">客户已过期：</span>{detail.expiredTicketCount ?? '-'} 张
               </p>
               <p className="text-sm text-gray-700 mt-1">
                 <span className="text-gray-400">预估补发：</span>{detail.estimatedTickets ?? 0} 张

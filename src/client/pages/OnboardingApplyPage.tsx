@@ -1,6 +1,31 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { applyOnboarding, getOnboardingOptions } from '../../api/onboarding';
+import { applyOnboarding, getOnboardingOptions, uploadOnboardingImage } from '../../api/onboarding';
+
+/** 随内容自动拓展高度的文本域（内容增多时高度自动增高） */
+function AutoTextarea({ value, onChange, className, placeholder, minRows = 1 }: {
+  value: string; onChange: (v: string) => void; className?: string; placeholder?: string; minRows?: number;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const resize = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.max(el.scrollHeight, minRows * 24) + 'px';
+  };
+  useEffect(() => { resize(); }, [value]);
+  return (
+    <textarea
+      ref={ref}
+      rows={minRows}
+      className={`${className || ''} resize-none overflow-hidden`}
+      value={value}
+      placeholder={placeholder}
+      onChange={(e) => { onChange(e.target.value); }}
+      onInput={resize}
+    />
+  );
+}
 
 /**
  * 入职管理 · 阶段一：新员工自主信息录入（发起入职）
@@ -29,6 +54,10 @@ export default function OnboardingApplyPage() {
     materials: '',
     supervisorCode: '',
   });
+  // 佐证材料图片：上传后展示缩略图，提交时与文本材料合并
+  const [materialImages, setMaterialImages] = useState<string[]>([]);
+  const [uploadingImg, setUploadingImg] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     getOnboardingOptions()
@@ -41,6 +70,29 @@ export default function OnboardingApplyPage() {
   const inputCls =
     'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary';
 
+  const handleSelectImages = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setError('');
+    const list = Array.from(files).filter((f) => /^image\/(jpeg|png|gif|webp)$/i.test(f.type));
+    if (list.length === 0) return setError('仅支持 jpg/png/gif/webp 格式图片');
+    if (list.some((f) => f.size > 5 * 1024 * 1024)) return setError('单张图片不能超过 5MB，请压缩后重试');
+    setUploadingImg(true);
+    try {
+      const urls: string[] = [];
+      for (const f of list) {
+        const r = await uploadOnboardingImage(f);
+        if (r.ok && r.url) urls.push(r.url);
+        else throw new Error(r.message || '上传失败');
+      }
+      setMaterialImages((prev) => [...prev, ...urls]);
+    } catch (e: any) {
+      setError(e?.response?.data?.message || e?.message || '图片上传失败，请重试');
+    } finally {
+      setUploadingImg(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   const handleSubmit = async () => {
     setError('');
     setSuccess('');
@@ -49,10 +101,11 @@ export default function OnboardingApplyPage() {
     if (!form.supervisorCode) return setError('请选择负责督导');
     setSubmitting(true);
     try {
-      const materials = form.materials
+      const textMaterials = form.materials
         .split(/[\n,，;；]/)
         .map((s) => s.trim())
         .filter(Boolean);
+      const materials = [...textMaterials, ...materialImages];
       const res = await applyOnboarding({
         userName: form.userName.trim(),
         phone: form.phone.trim(),
@@ -74,6 +127,7 @@ export default function OnboardingApplyPage() {
           userName: '', phone: '', gender: '', idCard: '', birthday: '', education: '',
           emergencyContact: '', emergencyPhone: '', address: '', email: '', resumeText: '', materials: '', supervisorCode: '',
         });
+        setMaterialImages([]);
       } else {
         setError(res.message || '提交失败');
       }
@@ -158,12 +212,39 @@ export default function OnboardingApplyPage() {
         <div className="mb-6 grid gap-4">
           <div>
             <label className="block text-sm text-gray-600 mb-1">自我评价 / 工作经历简述</label>
-            <textarea className={`${inputCls} min-h-24`} value={form.resumeText} onChange={(e) => set('resumeText', e.target.value)} placeholder="可简述工作经历、技能特长等" />
+            <AutoTextarea className={`${inputCls}`} minRows={3} value={form.resumeText} onChange={(v) => set('resumeText', v)} placeholder="可简述工作经历、技能特长等" />
           </div>
           <div>
-            <label className="block text-sm text-gray-600 mb-1">佐证材料</label>
-            <textarea className={`${inputCls} min-h-16`} value={form.materials} onChange={(e) => set('materials', e.target.value)} placeholder="每行填写一个材料名称，如：身份证复印件&#10;毕业证照片&#10;离职证明（如适用）" />
+            <label className="block text-sm text-gray-600 mb-1">佐证材料（文字说明）</label>
+            <AutoTextarea className={`${inputCls}`} minRows={2} value={form.materials} onChange={(v) => set('materials', v)} placeholder="每行填写一个材料名称，如：身份证复印件&#10;毕业证照片&#10;离职证明（如适用）" />
             <p className="text-xs text-gray-400 mt-1">支持每行一条，或用逗号分隔（身份证、学历证书、体检报告等）</p>
+          </div>
+          <div>
+            <label className="block text-sm text-gray-600 mb-1">佐证材料（图片上传）</label>
+            <div className="flex flex-wrap gap-3 items-start">
+              {materialImages.map((url, i) => (
+                <div key={url} className="relative w-24 h-24 rounded-lg overflow-hidden border border-gray-200 group">
+                  <img src={url} alt={`佐证材料${i + 1}`} className="w-full h-full object-cover" />
+                  <button type="button" onClick={() => setMaterialImages((prev) => prev.filter((_, j) => j !== i))}
+                    className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white text-xs leading-none hover:bg-red-600">×</button>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadingImg}
+                className="w-24 h-24 rounded-lg border-2 border-dashed border-gray-300 text-gray-400 hover:border-blue-400 hover:text-blue-500 flex flex-col items-center justify-center gap-1 text-xs disabled:opacity-50"
+              >
+                {uploadingImg ? (
+                  <><span className="animate-spin inline-block">◌</span>上传中</>
+                ) : (
+                  <><span className="text-xl leading-none">＋</span>上传图片</>
+                )}
+              </button>
+              <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple className="hidden"
+                onChange={(e) => handleSelectImages(e.target.files)} />
+            </div>
+            <p className="text-xs text-gray-400 mt-1">支持 jpg/png/gif/webp，单张不超过 5MB，可多选（身份证、毕业证、体检报告等照片）</p>
           </div>
           <div>
             <label className="block text-sm text-gray-600 mb-1">负责督导 <span className="text-red-500">*</span></label>

@@ -729,12 +729,12 @@ router.post('/:id/complete', authMiddleware, async (req: Request, res: Response)
       `处理备注：${remark || '无'}`,
     ].join('\n');
 
-    // 推送给赵振宇
+    // 推送给韩会玲
     try {
       await dispatchCustomNotification(messageContent, 'manual', {
         templateTitle: '洗鞋反馈补发通知',
         recipientOverride: [
-          { name: '赵振宇', wechatAccount: 'ZY00001@zzkdg' },
+          { name: '韩会玲', wechatAccount: 'HanHuiLing' },
         ],
       });
     } catch (pushErr: any) {
@@ -820,13 +820,13 @@ router.post('/:id/repush', authMiddleware, async (req: Request, res: Response) =
       `处理备注：${r.handlerRemark || '无'}`,
     ].join('\n');
 
-    // 推送给赵振宇
+    // 推送给韩会玲
     let pushResult: { summary: string; detail: any[] } = { summary: '推送失败', detail: [] };
     try {
       pushResult = await dispatchCustomNotification(messageContent, 'manual', {
         templateTitle: '洗鞋反馈补发通知',
         recipientOverride: [
-          { name: '赵振宇', wechatAccount: 'ZY00001@zzkdg' },
+          { name: '韩会玲', wechatAccount: 'HanHuiLing' },
         ],
       });
     } catch (pushErr: any) {

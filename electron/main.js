@@ -1,41 +1,23 @@
 /**
- * 卡迪高巡店系统 - Electron 桌面端主进程
+ * 卡迪高运营管理系统 - Electron 桌面端主进程（纯壳版）
  *
  * 职责：
- *  1. 内嵌启动 Express 后端（dist/server/server.js），以 CARDIGAO_BASE_DIR
- *     指向应用资源目录，保证配置/静态资源/证书路径在打包后仍正确。
- *  2. 加载前端页面（生产：http://127.0.0.1:PORT；开发：vite dev server）。
- *  3. 集成 electron-updater 自动更新：启动后自动检查更新，下载完成后
+ *  1. 纯壳模式：不再内嵌 Express 后端与本地静态资源，
+ *     窗口直接加载公网页面 https://xdxt.henankadigao.cn/（与安卓 WebView 一致）。
+ *     前端每轮修改只需构建并发布到公网，已安装客户端下次打开即加载新版页面。
+ *  2. 集成 electron-updater 自动更新：启动后自动检查更新，下载完成后
  *     提示用户重启安装，实现"发布新版本无需用户手动装包"。
+ *  3. 通过 preload 暴露桌面端标识与版本信息，供登录前强制版本检查
+ *     与"退出后永远回登录页"策略使用。
  */
-const { app, BrowserWindow, dialog, shell } = require('electron');
+const { app, BrowserWindow, dialog, shell, ipcMain } = require('electron');
 const path = require('path');
-const http = require('http');
+const https = require('https');
 const { autoUpdater } = require('electron-updater');
-const { spawn } = require('child_process');
 
 const isDev = !app.isPackaged;
-// 打包后：config.json 经 extraResources 作为模板随包分发（resources/config.json），
-// 首次启动复制到用户数据目录；uploads/shipin/certs/updates 运行时在用户数据目录
-// 动态创建，避免安装目录（如 Program Files）只读导致上传/写入失败。
-// dist/server 与后端生产依赖在 app.asar 虚拟包中，由 ELECTRON_RUN_AS_NODE 子进程
-// 直接加载（Electron 自带 asar 寻址）。
-const BASE_DIR = isDev ? process.cwd() : app.getPath('userData');
-const SERVER_PORT = 31688;
-
-/** 打包后首次启动：准备运行时数据目录并复制 config.json 模板 */
-function ensureRuntimeDirs() {
-  if (isDev) return;
-  const fs = require('fs');
-  for (const dir of ['uploads', 'shipin', 'certs', 'updates']) {
-    fs.mkdirSync(path.join(BASE_DIR, dir), { recursive: true });
-  }
-  const dest = path.join(BASE_DIR, 'config.json');
-  if (!fs.existsSync(dest)) {
-    const src = path.join(process.resourcesPath, 'config.json');
-    if (fs.existsSync(src)) fs.copyFileSync(src, dest);
-  }
-}
+/** 生产环境公网入口（纯壳模式统一指向公网，与安卓 WebView 一致） */
+const PROD_URL = 'https://xdxt.henankadigao.cn/';
 
 // ---------------------------------------------------------------------------
 // 自动更新
@@ -50,6 +32,59 @@ function getUpdateUrl() {
   // electron-builder 会把 publish url 写入 app-update.yml（打包后自动生成并在 resources 中），
   // electron-updater 优先读取该文件；此处仅作显式兜底。
   return 'https://xdxt.henankadigao.cn/updates/win';
+}
+
+/** 语义化版本比较：a > b 返回 1，a < b 返回 -1，相等返回 0 */
+function compareVersions(a, b) {
+  const pa = String(a || '').split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = String(b || '').split('.').map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  return 0;
+}
+
+/**
+ * 快速拉取公网 latest.yml 中的 version 字段（仅几 KB，秒级返回）。
+ * 用于「预检查」：不等 electron-updater 完整检查（含差分计算，可能要十几秒），
+ * 先让用户第一时间看到"发现新版本"弹窗，后台再走正式下载。
+ */
+function fetchLatestYamlVersion(feedUrl) {
+  return new Promise((resolve) => {
+    let req;
+    const request = (url) => {
+      req = https.get(url, {
+        headers: { 'User-Agent': 'cardigao-updater', Accept: '*/*' },
+        timeout: 8000,
+      }, (res) => {
+        // 跟随重定向（最多 3 跳）
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          return resolve(fetchLatestYamlVersion(res.headers.location));
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          return resolve(null);
+        }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          body += chunk;
+          if (body.length > 65536) req.destroy();
+        });
+        res.on('end', () => {
+          const m = body.match(/^version:\s*([^\s]+)/m);
+          resolve(m ? m[1].trim() : null);
+        });
+      });
+      req.on('timeout', () => req.destroy());
+      req.on('error', () => resolve(null));
+    };
+    request(feedUrl);
+  });
 }
 
 function setupAutoUpdater(win) {
@@ -67,26 +102,112 @@ function setupAutoUpdater(win) {
     }
   }
 
+  // 周期轮询状态：启动即刻首查（预检查），此后每 30 分钟复查一次，
+  // 保证客户端长期运行（用户一直不重启/不登录）也能及时发现新版本。
+  const CHECK_INTERVAL_MS = 30 * 60 * 1000;
+  let checkTimer = null;
+  let checking = false;             // 防重入：同一时刻只发起一次检查
+  let lastNotifiedVersion = null;   // 弹窗节流：同一版本只弹一次"发现新版本"
+  let downloadedVersion = null;     // 新版本已下载完成：停止轮询，等用户重启安装
+
+  const scheduleNextCheck = () => {
+    if (checkTimer) clearTimeout(checkTimer);
+    if (downloadedVersion) return; // 已下载待重启，不再轮询
+    checkTimer = setTimeout(() => {
+      doCheckForUpdates();
+    }, CHECK_INTERVAL_MS);
+  };
+
+  const doCheckForUpdates = () => {
+    if (checking) return;
+    checking = true;
+    autoUpdater
+      .checkForUpdates()
+      .catch((err) => {
+        console.error('[updater] check failed:', err && err.message ? err.message : err);
+        // 检查失败（网络抖动等）也继续轮询，避免一次失败后永久失去检查能力
+        scheduleNextCheck();
+      })
+      .finally(() => {
+        checking = false;
+      });
+  };
+
+  /** 弹一次"发现新版本"（IPC 浮层 + 原生弹窗），同一版本只弹一次 */
+  const notifyUpdateAvailable = (version) => {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('update-status', { status: 'available', version });
+    }
+    dialog
+      .showMessageBox(win, {
+        type: 'info',
+        title: '发现新版本',
+        message: `发现新版本 ${version}`,
+        detail: '更新包正在后台自动下载，下载完成后会提示您重启安装。' +
+          (compareVersions(app.getVersion(), version) < 0
+            ? '\n\n提示：发布新版本后，旧版本客户端将不能登录，请及时完成更新。'
+            : ''),
+        buttons: ['知道了'],
+        defaultId: 0,
+        noLink: true,
+      })
+      .catch(() => {});
+  };
+
+  /**
+   * 预检查：启动后立即用 HTTPS 直接拉 latest.yml（几 KB），
+   * 有新版本就立刻弹窗通知（通常 1~3 秒内），随后再让
+   * electron-updater 走正式检查与后台下载（差分/全量）。
+   */
+  const preCheckAndNotify = async () => {
+    if (isDev || !updaterFeed) return;
+    try {
+      const remote = await fetchLatestYamlVersion(updaterFeed + '/latest.yml');
+      if (!remote) {
+        scheduleNextCheck();
+        return;
+      }
+      const current = app.getVersion();
+      if (compareVersions(remote, current) > 0) {
+        if (lastNotifiedVersion !== remote) {
+          lastNotifiedVersion = remote;
+          console.log('[updater] pre-check found new version:', remote, 'current:', current);
+          notifyUpdateAvailable(remote);
+        }
+        // 触发正式检查：update-available 因 lastNotifiedVersion 节流不会重复弹窗，
+        // 但 autoDownload 会继续在后台下载新版本。
+        doCheckForUpdates();
+      } else {
+        scheduleNextCheck();
+      }
+    } catch (e) {
+      console.error('[updater] pre-check failed:', e && e.message ? e.message : e);
+      scheduleNextCheck();
+    }
+  };
+
   autoUpdater.on('checking-for-update', () => {
     console.log('[updater] checking for update...');
   });
   autoUpdater.on('update-available', (info) => {
     console.log('[updater] update available:', info.version);
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('update-status', {
-        status: 'available',
-        version: info.version,
-      });
+    // 兜底：预检查未命中（latest.yml 拉取失败）时仍由 electron-updater 弹窗
+    if (lastNotifiedVersion !== info.version) {
+      lastNotifiedVersion = info.version;
+      notifyUpdateAvailable(info.version);
     }
   });
-  autoUpdater.on('update-not-available', (info) => {
+  autoUpdater.on('update-not-available', () => {
     console.log('[updater] update not available');
     if (win && !win.isDestroyed()) {
       win.webContents.send('update-status', { status: 'not-available' });
     }
+    // 本轮无更新，30 分钟后再复查（长驻客户端也能发现后续发布的新版本）
+    scheduleNextCheck();
   });
   autoUpdater.on('error', (err) => {
     console.error('[updater] error:', err && err.message ? err.message : err);
+    try { if (win && !win.isDestroyed()) win.setProgressBar(-1); } catch (e) {}
     if (win && !win.isDestroyed()) {
       win.webContents.send('update-status', {
         status: 'error',
@@ -95,15 +216,21 @@ function setupAutoUpdater(win) {
     }
   });
   autoUpdater.on('download-progress', (progressObj) => {
+    const pct = Math.round(progressObj.percent || 0);
     if (win && !win.isDestroyed()) {
+      // Windows 任务栏图标实时显示下载进度
+      try { win.setProgressBar(pct / 100); } catch (e) { /* 非 Windows 或 unsupported 忽略 */ }
       win.webContents.send('update-status', {
         status: 'downloading',
-        percent: Math.round(progressObj.percent || 0),
+        percent: pct,
       });
     }
   });
   autoUpdater.on('update-downloaded', (info) => {
     console.log('[updater] update downloaded:', info.version);
+    downloadedVersion = info.version;
+    if (checkTimer) clearTimeout(checkTimer);
+    try { if (win && !win.isDestroyed()) win.setProgressBar(-1); } catch (e) {}
     if (win && !win.isDestroyed()) {
       win.webContents.send('update-status', {
         status: 'downloaded',
@@ -128,67 +255,14 @@ function setupAutoUpdater(win) {
       .catch(() => {});
   });
 
-  // 仅生产环境（打包后）启用自动更新
+  // 仅生产环境（打包后）立即执行预检查——启动即查
   if (!isDev) {
-    setTimeout(() => {
-      autoUpdater.checkForUpdates().catch((err) => {
-        console.error('[updater] check failed:', err && err.message ? err.message : err);
-      });
-    }, 3000);
+    preCheckAndNotify();
   }
 }
 
-// ---------------------------------------------------------------------------
-// 内嵌后端启动
-// ---------------------------------------------------------------------------
-/**
- * 以子进程方式启动 Express 后端，避免把整个服务端耦合进主进程生命周期。
- * 使用 CARDIGAO_BASE_DIR 指向 app.asar 解包后的资源目录。
- */
-function startBackend() {
-  // 打包后 serverEntry 位于 app.asar 内（files: dist/**/* 已打入）。
-  // 子进程以 ELECTRON_RUN_AS_NODE 模式复用 electron 二进制运行，
-  // 保留 asar 寻址能力，无需解包。
-  const serverEntry = isDev
-    ? path.join(BASE_DIR, 'dist', 'server', 'server.js')
-    : path.join(process.resourcesPath, 'app.asar', 'dist', 'server', 'server.js');
-  const child = spawn(process.execPath, [serverEntry], {
-    cwd: BASE_DIR,
-    env: {
-      ...process.env,
-      ELECTRON_RUN_AS_NODE: '1',
-      CARDIGAO_BASE_DIR: BASE_DIR,
-      PORT: String(SERVER_PORT),
-      NODE_ENV: 'production',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
-
-  child.stdout.on('data', (d) => process.stdout.write(`[server] ${d}`));
-  child.stderr.on('data', (d) => process.stderr.write(`[server:err] ${d}`));
-  child.on('exit', (code, signal) => {
-    console.log(`[server] backend exited code=${code} signal=${signal}`);
-  });
-  return child;
-}
-
-/** 轮询等待后端就绪 */
-function waitForBackend(url, timeoutMs, cb) {
-  const start = Date.now();
-  const tryOnce = () => {
-    const req = http.get(url, (res) => {
-      res.resume();
-      cb(true);
-    });
-    req.on('error', () => {
-      if (Date.now() - start > timeoutMs) return cb(false);
-      setTimeout(tryOnce, 500);
-    });
-    req.setTimeout(2000, () => req.destroy());
-  };
-  tryOnce();
-}
+// 渲染进程读取桌面端版本信息（登录前强制版本检查用）
+ipcMain.handle('get-app-info', () => ({ version: app.getVersion() }));
 
 // ---------------------------------------------------------------------------
 // 窗口
@@ -199,7 +273,7 @@ function createWindow() {
     height: 900,
     minWidth: 1024,
     minHeight: 700,
-    title: '卡迪高巡店系统',
+    title: '卡迪高运营管理系统',
     icon: path.join(__dirname, '../build/icon.png'),
     autoHideMenuBar: true,
     webPreferences: {
@@ -214,45 +288,24 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  const devUrl = process.env.VITE_DEV_URL || 'http://localhost:5173';
-  const prodUrl = `http://127.0.0.1:${SERVER_PORT}`;
-
-  if (isDev) {
-    win.loadURL(devUrl);
-  } else {
-    win.loadURL(prodUrl);
-  }
+  const url = isDev
+    ? process.env.VITE_DEV_URL || 'http://localhost:5173'
+    : PROD_URL;
+  win.loadURL(url);
   return win;
 }
 
 // ---------------------------------------------------------------------------
 // 生命周期
 // ---------------------------------------------------------------------------
-let backend = null;
 app.whenReady().then(() => {
-  ensureRuntimeDirs();
-  if (!isDev) {
-    backend = startBackend();
-    waitForBackend(`http://127.0.0.1:${SERVER_PORT}`, 30000, (ok) => {
-      const win = createWindow();
-      if (ok) {
-        setupAutoUpdater(win);
-      } else {
-        dialog.showErrorBox(
-          '服务启动失败',
-          `后端服务在 ${SERVER_PORT} 端口未能启动，请检查安装目录完整性后重试。`
-        );
-        app.quit();
-      }
-    });
-  } else {
-    const win = createWindow();
-    setupAutoUpdater(win);
-  }
+  const win = createWindow();
+  setupAutoUpdater(win);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+      const w = createWindow();
+      setupAutoUpdater(w);
     }
   });
 });
@@ -260,12 +313,5 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
-  }
-});
-
-app.on('before-quit', () => {
-  if (backend) {
-    backend.kill();
-    backend = null;
   }
 });

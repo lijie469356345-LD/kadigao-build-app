@@ -160,7 +160,7 @@ export const MENU_GRANTS_V3: MenuGrantV3[] = [
   { portalEn: 'baseInfo', menuEn: 'onboarding', roles: ['supervisor', 'area_manager', 'ops_director', 'hr', 'hr_staff', 'admin_staff', 'finance', 'finance_staff', 'cashier', 'data_admin', 'super_admin', 'it'] },
   { portalEn: 'baseInfo', menuEn: 'onboardingBadge', roles: ['admin_staff', 'hr_staff', 'finance', 'finance_staff', 'cashier', 'data_admin', 'super_admin', 'it'] },
   { portalEn: 'baseInfo', menuEn: 'onboardingCardAdjust', roles: ['admin_staff', 'hr_staff', 'hr', 'member', 'data_admin', 'super_admin', 'it'] },
-  { portalEn: 'baseInfo', menuEn: 'regularization', roles: ['data_admin', 'super_admin', 'it'] },
+  { portalEn: 'baseInfo', menuEn: 'regularization', roles: ['supervisor', 'area_manager', 'ops_director', 'hr', 'hr_staff', 'admin_staff', 'finance', 'finance_staff', 'cashier', 'data_admin', 'super_admin', 'it'] },
   { portalEn: 'baseInfo', menuEn: 'transfer', roles: ['data_admin', 'super_admin', 'it'] },
   { portalEn: 'baseInfo', menuEn: 'resignation', roles: ['data_admin', 'super_admin', 'it'] },
   // 考勤门户（新增：打卡/排班/考勤报表）

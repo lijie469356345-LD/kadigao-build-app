@@ -1,7 +1,7 @@
 {
   "name": "store-inspection-app",
-  "version": "1.0.1",
-  "description": "安卓移动端巡店管理APP",
+  "version": "1.1.8",
+  "description": "卡迪高运营管理系统 - Windows 桌面端（纯壳）",
   "main": "electron/main.js",
   "scripts": {
     "start": "node dist/server/server.js",
@@ -64,22 +64,14 @@
   },
   "build": {
     "appId": "com.cardigao.inspection",
-    "productName": "卡迪高巡店系统",
+    "productName": "卡迪高运营管理系统",
     "directories": {
       "output": "dist-electron",
       "buildResources": "build"
     },
     "files": [
-      "dist/**/*",
       "electron/**/*",
-      "package.json",
-      "!dist/client/updates/**"
-    ],
-    "extraResources": [
-      {
-        "from": "config.json",
-        "to": "config.json"
-      }
+      "package.json"
     ],
     "win": {
       "target": "nsis",
@@ -96,7 +88,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "卡迪高巡店系统"
+      "shortcutName": "卡迪高运营管理系统"
     },
     "publish": [
       {

@@ -70,11 +70,11 @@ export const connectDB = async () => {
       const net = require('net');
       log('[DB] 步骤1-OK');
 
-      // 步骤2: TCP 直连
+      // 步骤2: TCP 直连（对外部用户不可达的内网地址快速失败，避免拖慢启动）
       log('[DB] 步骤2-TCP...');
       await new Promise<void>((resolve, reject) => {
         const s = new net.Socket();
-        s.setTimeout(8000);
+        s.setTimeout(4000);
         s.on('connect', () => { s.destroy(); log('[DB] 步骤2-TCP-OK'); resolve(); });
         s.on('timeout', () => { s.destroy(); reject(new Error('超时')); });
         s.on('error', (e: any) => { s.destroy(); reject(e); });

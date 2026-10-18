@@ -35,6 +35,7 @@ import { registerAllPortalEntries } from './services/portalRegistry';
 import { runAllMigrations } from './services/tableMigration';
 import { ensureStandardPermissionTables } from './services/permissionSchema';
 import { ensureOnboardingTables } from './services/onboardingSchema';
+import { ensureResignationTables } from './services/resignationSchema';
 import { calculateDailyScores } from './routes/scores';
 import dailyShopTargetsRoutes from './routes/dailyShopTargets';
 import dailyProductTargetsRoutes from './routes/dailyProductTargets';
@@ -59,6 +60,9 @@ import growthClassroomRoutes from './routes/growthClassroom';
 import shoeFeedbackRoutes, { startVoidScheduler } from './routes/shoeFeedback';
 import hourlyPerformanceRoutes, { startHourlyPerformanceScheduler } from './routes/hourlyPerformance';
 import onboardingRoutes, { startOnboardingScheduler } from './routes/onboarding';
+import resignationRoutes from './routes/resignation';
+import downloadCenterRoutes from './routes/downloadCenter';
+import systemRoutes from './routes/system';
 
 // ============================================================
 // 进程级错误保护：任何未捕获的异常都不会导致服务器崩溃
@@ -134,6 +138,8 @@ const PUBLIC_API_PREFIXES = [
   '/register/check-phone',  // 手机号注册状态检查（未登录可访问）
   '/onboarding/options',    // 入职录入页下拉数据（未登录可访问）
   '/onboarding/apply',      // 入职申请提交（未登录可访问）
+  '/download-center',       // 下载中心（登录前即可获取各平台安装包）
+  '/system/version-policy', // 版本策略（登录前检查最低可用版本）
 ];
 
 function isPublicApiPath(p: string): boolean {
@@ -241,6 +247,23 @@ app.use('/api/growth-classroom', growthClassroomRoutes);
 app.use('/api/shoe-feedback', shoeFeedbackRoutes);
 app.use('/api/hourly-performance', hourlyPerformanceRoutes);
 app.use('/api/onboarding', onboardingRoutes);
+app.use('/api/resignation', resignationRoutes);
+app.use('/api/download-center', downloadCenterRoutes);
+app.use('/api/system', systemRoutes);
+
+// ============================================================
+// 下载中心静态目录：/downloads 直出安装包
+// 用户把各平台安装包（exe/dmg/apk）放入 downloads/ 目录后，
+// 即可通过 https://xdxt.henankadigao.cn/downloads/文件名 下载。
+// 强制 Content-Disposition: attachment，确保浏览器触发下载而非预览。
+// ============================================================
+const downloadsBaseDir = path.join(process.env.CARDIGAO_BASE_DIR || process.cwd(), 'downloads');
+app.use('/downloads', express.static(downloadsBaseDir, {
+  setHeaders: (res) => {
+    res.setHeader('Content-Disposition', 'attachment');
+    res.setHeader('Cache-Control', 'no-store');
+  },
+}));
 
 // ============================================================
 // 企业微信可信域名验证：响应 /WW_verify_xxxx.txt
@@ -319,6 +342,18 @@ app.use((err: any, _req: Request, res: Response, next: any) => {
 });
 
 const startServer = async () => {
+  // HTTP 监听先行：端口秒级就绪，数据库连接与迁移在后台进行。
+  // 避免外部用户（无法访问开发内网库）在连接等待期间窗口内 31688 尚未监听。
+  const httpServer = app.listen(PORT, HOST, () => {
+    console.log(`HTTP Server running on http://${HOST}:${PORT}`);
+  });
+  httpServer.on('error', (e: any) => {
+    console.error(`[FATAL] HTTP 端口 ${PORT} 监听失败: ${e?.message}`);
+    if (e && e.code === 'EADDRINUSE') {
+      console.error(`端口 ${PORT} 已被占用，请关闭占用该端口的程序（可能为旧版本残留进程）后重新打开应用。`);
+    }
+  });
+
   try {
     await connectDB();
     console.log('数据库连接成功');
@@ -329,6 +364,8 @@ const startServer = async () => {
     await ensureStandardPermissionTables();
     // 入职管理数据表（onboarding_record 等 6 张）
     await ensureOnboardingTables();
+    // 离职管理数据表（resignation_record）
+    await ensureResignationTables();
   } catch (error) {
     console.error('数据库连接失败:', error);
     console.log('服务器将使用Mock数据运行');
@@ -371,10 +408,6 @@ const startServer = async () => {
   } catch (err) {
     console.error('启动入职时效管控调度失败:', err);
   }
-
-  app.listen(PORT, HOST, () => {
-    console.log(`HTTP Server running on http://${HOST}:${PORT}`);
-  });
 
   // HTTPS 服务：用于企业微信回调（需要 SSL 证书）
   const sslDir = path.join(process.env.CARDIGAO_BASE_DIR || process.cwd(), 'certs');
