@@ -108,9 +108,9 @@ export default function DownloadCenterPage() {
                     <div className="divide-y divide-gray-100">
                       {files.map(f => (
                         <div key={f.name} className="flex items-center justify-between gap-4 px-4 py-3">
-                          <div className="min-w-0">
-                            <div className="text-sm font-medium text-gray-800 truncate">{f.name}</div>
-                            <div className="text-xs text-gray-500 mt-0.5">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm font-medium text-gray-800 break-words whitespace-normal">{f.name}</div>
+                            <div className="text-xs text-gray-500 mt-0.5 break-words whitespace-normal">
                               {f.sizeMB} MB · 更新于 {formatTime(f.mtime)}
                             </div>
                           </div>

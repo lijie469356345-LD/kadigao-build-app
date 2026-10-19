@@ -60,5 +60,7 @@ jobs:
         with:
           name: mac-installer-${{ matrix.arch }}
           path: |
-            dist-electron/Mac/*
+            dist-electron/Mac/*.dmg
+            dist-electron/Mac/*.dmg.blockmap
+            dist-electron/Mac/latest-mac.yml
           if-no-files-found: error
